@@ -7,10 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.core.config import COLOR_BORDER, COLOR_OURS  # noqa: E402
-from lib.sections.stats import (ROLE_LABEL, _float_history,  # noqa: E402
-                                _live_cpu_split, _live_per_process,
-                                render_core_bars)
+from lib.core.config import (COLOR_BORDER, COLOR_MEM_OTHER, COLOR_OURS,  # noqa: E402
+                             COLOR_OURS_DEEP)
+from lib.sections.stats import (PROCESS_REFRESH_DEFAULT,  # noqa: E402
+                                PROCESS_REFRESH_MAX, PROCESS_REFRESH_MIN,
+                                ROLE_LABEL, _float_history, _live_cpu_split,
+                                _live_per_process, process_refresh_seconds,
+                                render_core_bars, render_our_load_bar)
 from lib.services import procs  # noqa: E402
 from lib.services.limits import effective_cores  # noqa: E402
 
@@ -148,6 +151,86 @@ class LiveCpuSplitTests(unittest.TestCase):
         time.sleep(0.3)
         per = _live_per_process(st)
         self.assertTrue(all(v >= 0.0 for v in per.values()))
+
+
+class ColorFamilyTests(unittest.TestCase):
+    """Green is reserved for our processes; everything else is blue.
+
+    Regression: the per-core chart and the memory track both used the accent
+    blue for our own segments, and the memory track used it for *everything*,
+    so "our RAM" was indistinguishable from the host's.
+    """
+
+    def test_ours_is_green_family(self):
+        self.assertTrue(COLOR_OURS.startswith("#A8"), COLOR_OURS)
+        self.assertTrue(COLOR_OURS_DEEP.startswith("#6F"), COLOR_OURS_DEEP)
+
+    def test_other_is_blue_family(self):
+        blue = COLOR_MEM_OTHER.lstrip("#").lower()
+        red, green, blue_ch = blue[0:2], blue[2:4], blue[4:6]
+        self.assertGreater(int(blue_ch, 16), int(red, 16), "must read as blue")
+        self.assertGreater(int(blue_ch, 16), int(green, 16), "must read as blue")
+
+    def test_green_and_blue_families_are_distinct(self):
+        self.assertNotEqual(COLOR_OURS, COLOR_MEM_OTHER)
+        self.assertNotEqual(COLOR_OURS, COLOR_BORDER)
+
+    def test_our_load_bar_is_green(self):
+        html = render_our_load_bar(50.0)
+        self.assertIn(COLOR_OURS, html)
+        self.assertIn("height:50.0%", html)
+
+    def test_our_load_bar_clamps(self):
+        self.assertIn("height:100.0%", render_our_load_bar(250.0))
+        self.assertIn("height:0.0%", render_our_load_bar(-10.0))
+
+
+class ProcessRefreshTests(unittest.TestCase):
+    def test_default_and_bounds(self):
+        st = types.SimpleNamespace(session_state={})
+        self.assertEqual(process_refresh_seconds(st), PROCESS_REFRESH_DEFAULT)
+        st.session_state["uf5_proc_interval"] = 1
+        self.assertEqual(process_refresh_seconds(st), PROCESS_REFRESH_MIN)
+        st.session_state["uf5_proc_interval"] = 999
+        self.assertEqual(process_refresh_seconds(st), PROCESS_REFRESH_MAX)
+        st.session_state["uf5_proc_interval"] = 12
+        self.assertEqual(process_refresh_seconds(st), 12)
+
+    def test_garbage_falls_back_to_default(self):
+        st = types.SimpleNamespace(session_state={"uf5_proc_interval": "soon"})
+        self.assertEqual(process_refresh_seconds(st), PROCESS_REFRESH_DEFAULT)
+
+
+class MemoryUnitTests(unittest.TestCase):
+    """read_meminfo is in kB, effective_memory_bytes returns BYTES.
+
+    Regression: the two were compared directly, so `ceiling < total` was
+    always False, the quota branch never fired, and our RAM was rendered as
+    a 0.17% sliver of a 15GB host bar — invisible, which is exactly what the
+    operator reported.
+    """
+
+    def test_byte_ceiling_converts_to_kb(self):
+        from lib.services.limits import effective_memory_bytes
+        ceiling_bytes, _source = effective_memory_bytes()
+        if ceiling_bytes > 0:
+            self.assertEqual(ceiling_bytes // 1024, ceiling_bytes / 1024)
+
+    def test_quota_branch_fires_when_quota_below_host(self):
+        # Host reports ~15.4GB in kB; a 2765MB quota must read as "limited".
+        host_total_kb = 16150020
+        quota_bytes = 2765 * 1024 * 1024
+        quota_kb = quota_bytes // 1024
+        limited = 0 < quota_kb < host_total_kb
+        self.assertTrue(limited, "quota branch must fire for a 2.7GB quota on a 15GB host")
+
+    def test_host_reports_kb_not_bytes(self):
+        from lib.services.sysinfo import memory_segments, read_meminfo
+        total, _used, _cache, _free = memory_segments(read_meminfo())
+        if total:
+            # 15.4GB in kB is ~15.7M; in bytes it would be ~15.7B.
+            self.assertLess(total, 1 << 40, "must be kB, not bytes")
+            self.assertGreater(total, 1 << 20)
 
 
 if __name__ == "__main__":

@@ -26,12 +26,15 @@ COLOR_WARN = "#C9A227"
 
 COLOR_ERR = "#C26D6D"
 
-COLOR_MEM_USED = "#4A7FA5"  # steel blue — application memory
+# Two families, and they must not blur together:
+#   green  = what OUR processes do (cores in our quota, our RSS)
+#   blue   = everything else on the shared host (other tenants, page cache)
+# The accent blue marks UI chrome, never data ownership.
+COLOR_OURS = "#A8C98A"        # pale green — our own processes
+COLOR_OURS_DEEP = "#6FA85C"   # deeper green — our hot segments / ghost
+COLOR_MEM_OTHER = "#4A7FA5"   # steel blue — other tenants / used by others
 
-# Pale green — cores inside our own quota, as opposed to the host's other
-# tenants (COLOR_BORDER). Distinct from the accent blue so a per-core chart
-# reads as ours/pale at a glance rather than accented/neutral.
-COLOR_OURS = "#A8C98A"
+COLOR_MEM_USED = "#4A7FA5"  # steel blue — application memory (legacy alias)
 
 COLOR_MEM_CACHE = "#A8C3D1"  # pale steel — page cache / reclaimable
 

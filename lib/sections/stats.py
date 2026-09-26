@@ -18,12 +18,15 @@ from lib.services.versions import render_versions
 
 
 def render_memory_bar() -> None:
-    """Single 0..max stacked track: used + cache + free (HTML, animated).
+    """Stacked track: ours (green) + everything else (blues), plus free.
 
-    /proc/meminfo reports host RAM on a quota-limited container, so the ceiling
-    is taken from the cgroup limit when there is one. The host total is kept as
-    a separate metric: seeing 16GB on a 2.7GB quota is exactly the confusion
-    this avoids.
+    /proc/meminfo reports host RAM on a quota-limited container, so the
+    ceiling comes from the quota. The host's used figure is then clamped to
+    the ceiling and OUR share is subtracted from it: a 45GB host reading
+    clipped to 2.7GB would otherwise swallow our 176MB entirely and the
+    green segment would be invisible. The truth is simpler — the host's
+    numbers are not our concern, so the track shows our RSS against the quota
+    and everything unaccounted as "other".
     """
     import streamlit as st
 
@@ -32,25 +35,35 @@ def render_memory_bar() -> None:
     if not total:
         st.caption("memory info unavailable (no /proc/meminfo)")
         return
-    ceiling, mem_source = effective_memory_bytes()
-    limited = mem_source in ("quota", "override") and 0 < ceiling < total
-    shown_total = ceiling if limited else total
-    # Our own processes are the memory we are responsible for; the host's
-    # free/total is context. Mixing them produced the "we use 1.2% RAM" line:
-    # our RSS divided by the host's 128GB is arithmetically true and
-    # operationally useless.
+    # Unit trap: read_meminfo is in kB, effective_memory_bytes is in BYTES.
+    # Comparing them directly is always False, which is why the quota branch
+    # never fired and our RAM was sliced out of a host-sized bar.
+    ceiling_bytes, mem_source = effective_memory_bytes()
+    ceiling_kb = ceiling_bytes // 1024
+    limited = mem_source in ("quota", "override") and 0 < ceiling_kb < total
+    shown_total = ceiling_kb if limited else total
+
     census = procs.census()
     our_rss_kb = sum(p.rss_kb for p in census if p.is_ours)
-    our_rss_kb = min(our_rss_kb, shown_total)
-    host_used_kb = min(used, shown_total) if limited else used
-    segs = [("Ours", our_rss_kb, COLOR_MEM_USED),
-            ("Host other", max(host_used_kb - our_rss_kb, 0), COLOR_MEM_CACHE),
-            ("Free", max(shown_total - host_used_kb, 0), COLOR_MEM_FREE)]
-    if not limited:
-        segs = [("Used", used, COLOR_MEM_USED), ("Cache", cache, COLOR_MEM_CACHE),
-                ("Free", free, COLOR_MEM_FREE)]
+    other_rss_kb = sum(p.rss_kb for p in census if not p.is_ours)
+    our_rss_kb = max(0, min(our_rss_kb, shown_total))
+    other_rss_kb = max(0, min(other_rss_kb, shown_total - our_rss_kb))
+
+    if limited:
+        # The host's "used" covers every tenant and cannot be split. Show our
+        # processes plus the pids we could not attribute, and let the rest of
+        # the quota read as headroom.
+        segs = [("Ours", our_rss_kb, COLOR_OURS),
+                ("Other pids", other_rss_kb, COLOR_MEM_OTHER),
+                ("Headroom", max(shown_total - our_rss_kb - other_rss_kb, 0), COLOR_MEM_FREE)]
+    else:
+        segs = [("Ours", min(our_rss_kb, shown_total), COLOR_OURS),
+                ("Used", max(used - our_rss_kb, 0), COLOR_MEM_OTHER),
+                ("Cache", cache, COLOR_MEM_CACHE),
+                ("Free", max(free - our_rss_kb, 0), COLOR_MEM_FREE)]
+
     bar = "".join(
-        f'<div class="uf5-memseg" title="{label} {fmt_mb(v)}" '
+        f'<div class="uf5-memseg" title="{label} {fmt_mb(v)} ({v / shown_total * 100:.1f}%)" '
         f'style="width:{v / shown_total * 100:.2f}%;background:{color}"></div>'
         for label, v, color in segs
     )
@@ -67,8 +80,10 @@ def render_memory_bar() -> None:
     else:
         c1.metric("Total", fmt_mb(total), "capacity", delta_color="off")
     c2.metric("Our RAM", fmt_mb(our_rss_kb), f"{our_rss_kb / shown_total * 100:.1f}% of quota")
-    c3.metric("Host used", fmt_mb(host_used_kb if limited else used),
-              "other tenants share this host" if limited else "of host total")
+    if limited:
+        c3.metric("Host used", fmt_mb(used), "all tenants, not ours", delta_color="off")
+    else:
+        c3.metric("Free", fmt_mb(free), f"{free / total * 100:.1f}% of host")
 
 
 def _float_history(raw: Any) -> dict[str, float]:
@@ -249,11 +264,18 @@ def render_cpu_panel() -> None:
     m2.metric("Other pids", f"{other_core_pct:.1f}%", f"{their_rss_mb:.0f} MB not ours", delta_color="off")
     m3.metric("Host per-core", f"{host_avg:.1f}%", "all tenants, not ours", delta_color="off")
 
+    # Our own load as a share of the quota: this is the only CPU figure the
+    # container can measure truthfully, and it is what the operator acts on.
+    st.markdown(
+        f'<div style="color:{COLOR_MUTED};font-size:11px;margin:10px 0 2px">'
+        f'our load, of {ours} core quota</div>', unsafe_allow_html=True)
+    st.markdown(render_our_load_bar(our_core_pct), unsafe_allow_html=True)
+
     if per_core:
-        # Which bars we own depends on whether the platform actually narrowed
-        # our affinity mask. When it did not (Cloud, --cpus without --cpuset)
-        # every visible core is marked as ours, which is worse than useless —
-        # so the chart is labelled honestly instead of claiming a split.
+        # The per-core rows come from /proc/stat, which is host-wide. When the
+        # platform narrowed our affinity mask the first `ours` rows are ours;
+        # when it did not (Cloud without cpuset) no row is attributable to us,
+        # so the chart is labelled as host-wide instead of claiming a split.
         split = source in ("quota", "override") and ours < len(per_core)
         limit = ours if split else len(per_core)
         prev = _float_history(st.session_state.get("uf5_cpu_prev"))
@@ -264,14 +286,50 @@ def render_cpu_panel() -> None:
         if split:
             st.markdown(
                 f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
-                f'first {limit} cores are ours (green) · the rest are other tenants (pale)</div>',
+                f'first {limit} cores are ours (green) · the rest are other tenants (blue)</div>',
                 unsafe_allow_html=True)
         else:
             st.markdown(
                 f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
-                f'per-core load for the whole host — the platform does not narrow our view to '
-                f'our {ours} core(s), so these numbers include other tenants</div>',
+                f'host per-core load — the platform does not narrow our view to our {ours} core(s), '
+                f'so these {len(per_core)} rows include other tenants. Our own load is the bar above.</div>',
                 unsafe_allow_html=True)
+
+
+PROCESS_REFRESH_DEFAULT = 5
+PROCESS_REFRESH_MIN = 2
+PROCESS_REFRESH_MAX = 30
+
+
+def process_refresh_seconds(st: Any) -> int:
+    """The operator's chosen refresh cadence for the process table.
+
+    Read from session_state rather than taken as an argument because the
+    slider writes there during the same rerun that builds the fragment, and
+    run_every is fixed at construction time — so the value has to come from
+    state on every pass, not from a stale local.
+    """
+    raw = st.session_state.get("uf5_proc_interval", PROCESS_REFRESH_DEFAULT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return PROCESS_REFRESH_DEFAULT
+    return max(PROCESS_REFRESH_MIN, min(PROCESS_REFRESH_MAX, value))
+
+
+def render_our_load_bar(pct: float) -> str:
+    """Single green track for our processes' share of the core quota.
+
+    The per-core chart below is host-wide and mostly other tenants' work; this
+    is the number that is actually ours, measured from /proc/<pid>/stat inside
+    the container. Green is reserved for it.
+    """
+    value = max(0.0, min(float(pct), 100.0))
+    return (
+        f'<div class="uf5-track" style="border-radius:8px">'
+        f'<div class="uf5-fill" style="height:{value:.1f}%;'
+        f'background:{COLOR_OURS};border-radius:8px"></div></div>'
+    )
 
 
 def _live_per_process(st: Any) -> dict[int, float]:
@@ -289,6 +347,8 @@ def _live_per_process(st: Any) -> dict[int, float]:
     stamp = st.session_state.get("uf5_proc_cpu_at")
     at = time.time()
     st.session_state["uf5_proc_cpu_at"] = at
+    # The window is measured, not assumed: the operator's slider can change the
+    # cadence, and a hardcoded 2s would scale every reading wrongly.
     if prev is None or stamp is None:
         return {}
     window = at - stamp
@@ -327,8 +387,21 @@ def render_processes() -> None:
     """
     import streamlit as st
 
+    # Refresh cadence is operator-controlled. run_every is baked in when the
+    # fragment is constructed, so changing the slider has to rebuild it — hence
+    # the value participates in the cache key below and the fragment is
+    # re-declared whenever it changes.
+    interval = process_refresh_seconds(st)
+    st.slider("Process refresh (seconds)", min_value=PROCESS_REFRESH_MIN,
+              max_value=PROCESS_REFRESH_MAX, value=interval, step=1,
+              key="uf5_proc_interval", label_visibility="collapsed")
+    st.markdown(
+        f'<div style="color:{COLOR_MUTED};font-size:11px;margin:2px 0 6px">'
+        f'refresh: every {interval}s · CPU now is the rate over that window</div>',
+        unsafe_allow_html=True)
+
     try:
-        live = st.fragment(run_every=5)
+        live = st.fragment(run_every=interval)
     except TypeError:
         live = st.fragment
 
