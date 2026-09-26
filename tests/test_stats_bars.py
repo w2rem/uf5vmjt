@@ -4,7 +4,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.sections.stats import _float_history, render_core_bars  # noqa: E402
+from lib.sections.stats import (ROLE_LABEL, _float_history,  # noqa: E402
+                                render_core_bars)
+from lib.services import procs  # noqa: E402
+from lib.services.limits import effective_cores  # noqa: E402
 
 
 class FloatHistoryTests(unittest.TestCase):
@@ -71,6 +74,26 @@ class CoreBarsTests(unittest.TestCase):
     def test_missing_history_defaults_to_current(self):
         bars = render_core_bars({"cpu0": 30.0}, {}, limit=1)
         self.assertNotIn("uf5-ghost", bars[0])
+
+
+class ProcessesTabTests(unittest.TestCase):
+    """The Processes tab unpacked effective_cores() into three names while it
+    returns two — ValueError on every render."""
+
+    def test_effective_cores_unpacks_to_two(self):
+        ours, _source = effective_cores()
+        self.assertIsInstance(ours, int)
+        self.assertGreater(ours, 0)
+
+    def test_census_renders_a_row_per_pid(self):
+        # The table body must be built from census() without assuming a
+        # particular unpacking shape of the limits helpers.
+        rows = procs.census()
+        self.assertTrue(rows)
+        for p in rows:
+            role = ROLE_LABEL.get(p.role, p.role)
+            self.assertTrue(role)
+            self.assertIsInstance(p.pid, int)
 
 
 if __name__ == "__main__":

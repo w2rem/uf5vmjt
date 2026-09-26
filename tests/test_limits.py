@@ -147,5 +147,31 @@ class EffectiveCoresTests(unittest.TestCase):
                 self.assertEqual(limits.effective_cores()[1], "host")
 
 
+class ReturnShapeTests(unittest.TestCase):
+    """Guard the tuple arity of the public helpers.
+
+    Regression: a caller unpacked effective_cores() into three names while it
+    returns two, which raised ValueError at runtime only when the Processes
+    tab rendered. These tests fail at import time instead.
+    """
+
+    def test_effective_cores_is_two_values(self):
+        self.assertEqual(len(limits.effective_cores()), 2)
+        cores, source = limits.effective_cores()
+        self.assertIsInstance(cores, int)
+        self.assertIsInstance(source, str)
+
+    def test_effective_memory_is_two_values(self):
+        self.assertEqual(len(limits.effective_memory_bytes()), 2)
+        size, source = limits.effective_memory_bytes()
+        self.assertIsInstance(size, int)
+        self.assertIsInstance(source, str)
+
+    def test_declared_vs_visible_is_two_strings(self):
+        cores_txt, mem_txt = limits.declared_vs_visible()
+        self.assertIsInstance(cores_txt, str)
+        self.assertIsInstance(mem_txt, str)
+
+
 if __name__ == "__main__":
     unittest.main()

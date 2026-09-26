@@ -232,7 +232,8 @@ def render_processes() -> None:
         if not census:
             st.caption("no processes visible")
             return
-        ours, _c, _p = effective_cores()
+        # effective_cores returns (cores, source) — two values, not three.
+        ours, _source = effective_cores()
         head = (
             f'<tr><th style="text-align:left;padding:0 12px 4px 0;color:{COLOR_MUTED};'
             f'font-weight:500">pid</th>'
