@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<!-- uf5 shell input: ghost-text autocomplete + Tab completion + dropdown.
+     Self-contained custom component (no build step). Speaks the Streamlit
+     iframe protocol by hand: componentReady / render / setComponentValue /
+     setFrameHeight. All completion happens locally in JS (zero roundtrips);
+     Python is only notified on Enter (submit). Comments in English only. -->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         background: transparent; }
+  .wrap { position: relative; width: 100%; }
+  .line { position: relative; height: 42px; background: #F4F6F8;
+          border: 1px solid #E2E7EB; border-radius: 10px; overflow: hidden; }
+  .line:focus-within { border-color: #4A7FA5;
+    box-shadow: 0 0 0 2px rgba(74,127,165,.18); }
+  .mirror { position: absolute; inset: 0; display: flex; align-items: center;
+            padding: 0 12px; font-size: 14px; line-height: 42px; white-space: pre;
+            pointer-events: none; overflow: hidden; }
+  .mirror .t { color: #2F3E46; }
+  .mirror .g { color: #9AA7B1; }
+  #cmd { position: absolute; inset: 0; width: 100%; height: 42px;
+         padding: 0 12px; font: inherit; font-size: 14px;
+         background: transparent; border: none; outline: none;
+         color: transparent; caret-color: #4A7FA5; }
+  #cmd::selection { background: rgba(74,127,165,.25); }
+  .drop { margin-top: 6px; background: #FFFFFF; border: 1px solid #E2E7EB;
+          border-radius: 10px; overflow: hidden;
+          box-shadow: 0 8px 24px -12px rgba(47,62,70,.25); display: none; }
+  .drop.open { display: block; }
+  .opt { padding: 7px 12px; font-size: 13px; color: #2F3E46; cursor: pointer;
+         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .opt small { color: #6C7A86; margin-left: 8px; }
+  .opt.sel, .opt:hover { background: #E8EDEF; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="line">
+    <div class="mirror" id="mirror"><span class="t" id="mt"></span><span class="g" id="mg"></span></div>
+    <input id="cmd" autocomplete="off" autocapitalize="off" spellcheck="false"
+           placeholder="Type a command — Tab completes" />
+  </div>
+  <div class="drop" id="drop"></div>
+</div>
+<script>
+(function () {
+  var GHOST_DELAY_MS = 500;   // pause before the ghost appears
+  var MAX_OPTS = 8;
+
+  var input = document.getElementById('cmd');
+  var mt = document.getElementById('mt');
+  var mg = document.getElementById('mg');
+  var drop = document.getElementById('drop');
+
+  function norm(p) {
+    var abs = p.charAt(0) === '/';
+    var parts = p.split('/');
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var s = parts[i];
+      if (!s || s === '.') continue;
+      if (s === '..') { if (out.length) out.pop(); continue; }
+      out.push(s);
+    }
+    return (abs ? '/' : '') + out.join('/');
+  }
+
+  function resolveDir(d) {
+    if (!d) return norm(cwd);
+    if (d.charAt(0) === '/') return norm(d);
+    if (d.charAt(0) === '~') return d;
+    return norm(cwd + '/' + d);
+  }
+
+  var binaries = [];   // PATH executables, from Python
+  var files = [];      // cwd entries, from Python
+  var dirs = {};       // dir listings cache: abs path -> entries, from Python
+  var cwd = '';        // current dir, from Python
+  var builtins = ['cd', 'clear', 'history', 'help', 'exit'];
+  var ghost = '';
+  var matches = [];
+  var selIdx = -1;
+  var ghostTimer = null;
+  var dropOpen = false;
+
+  function sendHeight() {
+    var h = 42 + 6 + (dropOpen ? Math.min(matches.length, MAX_OPTS) * 33 + 6 : 0);
+    parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: h }, '*');
+  }
+
+  function tokenInfo() {
+    var v = input.value;
+    var trailing = /[ \t]$/.test(v);
+    var parts = v.split(/[ \t]+/);
+    var cur = trailing ? '' : parts[parts.length - 1];
+    var first = parts.length <= 1 && !trailing;
+    return { cur: cur, first: first, head: trailing ? v : v.slice(0, v.length - cur.length) };
+  }
+
+  function poolFor(first, dirkey) {
+    if (first) return builtins.concat(binaries);
+    if (dirkey === null) return files;
+    var list = dirs[dirkey];
+    return list || [];
+  }
+
+  function splitCur(cur) {
+    var slash = cur.lastIndexOf('/');
+    if (slash < 0) return { dir: null, tail: cur, prefix: '', abs: false };
+    var dir = cur.slice(0, slash);
+    return { dir: dir, tail: cur.slice(slash + 1), prefix: dir ? dir + '/' : '/',
+             abs: cur.charAt(0) === '/' };
+  }
+
+  function matchCur(cur, first) {
+    var s = splitCur(cur);
+    var key = first ? null : (s.dir === null ? null : (s.abs && !s.dir ? '/' : resolveDir(s.dir)));
+    var pool = poolFor(first, key);
+    var out = [];
+    for (var i = 0; i < pool.length; i++) {
+      var c = pool[i];
+      if (s.dir === null || first) {
+        if (c.indexOf(s.tail) === 0 && c !== cur) out.push(c);
+      } else {
+        if (c.indexOf(s.tail) === 0) out.push(s.prefix + c);
+      }
+    }
+    return out;
+  }
+
+  function rescan() {
+    var t = tokenInfo();
+    if (!t.cur) { matches = []; ghost = ''; selIdx = -1; paint(); return; }
+    matches = matchCur(t.cur, t.first);
+    ghost = matches.length ? matches[0].slice(t.cur.length) : '';
+    selIdx = -1;
+    paint();
+  }
+
+  function paint() {
+    mt.textContent = input.value;
+    mg.textContent = ghost;
+    if (dropOpen) renderDrop();
+  }
+
+  function renderDrop() {
+    drop.innerHTML = '';
+    matches.slice(0, MAX_OPTS).forEach(function (m, i) {
+      var d = document.createElement('div');
+      d.className = 'opt' + (i === selIdx ? ' sel' : '');
+      var t = tokenInfo();
+      d.innerHTML = escapeHtml(t.head + m) + '<small>' + (t.first ? 'cmd' : 'path') + '</small>';
+      d.addEventListener('mousedown', function (e) {
+        e.preventDefault();
+        acceptMatch(m);
+      });
+      drop.appendChild(d);
+    });
+    drop.classList.toggle('open', dropOpen && matches.length > 0);
+    sendHeight();
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function setGhostTimer() {
+    clearTimeout(ghostTimer);
+    ghost = '';
+    paint();
+    ghostTimer = setTimeout(function () {
+      var t = tokenInfo();
+      if (!t.cur) { matches = []; ghost = ''; selIdx = -1; paint(); return; }
+      matches = matchCur(t.cur, t.first);
+      ghost = matches.length ? matches[0].slice(t.cur.length) : '';
+      selIdx = -1;
+      paint();
+    }, GHOST_DELAY_MS);
+  }
+
+  function acceptGhost() {
+    if (!ghost) return false;
+    input.value += ghost;
+    ghost = '';
+    closeDrop();
+    rescan();
+    return true;
+  }
+
+  function acceptMatch(m) {
+    var t = tokenInfo();
+    input.value = t.head + m + (m.charAt(m.length - 1) === '/' ? '' : ' ');
+    ghost = '';
+    closeDrop();
+    rescan();
+    input.focus();
+  }
+
+  function closeDrop() { dropOpen = false; drop.classList.remove('open'); sendHeight(); }
+
+  input.addEventListener('input', function () {
+    closeDrop();
+    var t = tokenInfo();
+    matches = t.cur ? matchCur(t.cur, t.first) : [];
+    selIdx = -1;
+    setGhostTimer();
+    paint();
+  });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (ghost) { acceptGhost(); return; }
+      if (!dropOpen) { rescan(); dropOpen = matches.length > 0; selIdx = -1; renderDrop(); return; }
+      if (selIdx >= 0 && matches[selIdx]) acceptMatch(matches[selIdx]);
+      else if (matches[0]) acceptMatch(matches[0]);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      var v = input.value;
+      closeDrop();
+      parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setComponentValue', value: v, dataType: 'json' }, '*');
+    } else if (e.key === 'Escape') {
+      ghost = ''; closeDrop(); paint();
+    } else if (e.key === 'ArrowDown' && dropOpen) {
+      e.preventDefault();
+      selIdx = Math.min(selIdx + 1, Math.min(matches.length, MAX_OPTS) - 1);
+      renderDrop();
+    } else if (e.key === 'ArrowUp' && dropOpen) {
+      e.preventDefault();
+      selIdx = Math.max(selIdx - 1, 0);
+      renderDrop();
+    }
+  });
+
+  input.addEventListener('blur', function () { setTimeout(closeDrop, 150); });
+
+  function onRender(event) {
+    // NOTE: Streamlit posts render as a bare {type, args, ...} with NO
+    // isStreamlitMessage flag (verified in the frontend bundle). Gate on
+    // type only; the flag is required solely for iframe->parent messages.
+    var data = event.data;
+    if (!data || data.type !== 'streamlit:render') return;
+    if (data.type === 'streamlit:render') {
+      var args = data.args || {};
+      binaries = args.binaries || [];
+      files = args.files || [];
+      dirs = args.dirs || {};
+      cwd = args.cwd || '';
+      rescan();
+      sendHeight();
+    }
+  }
+
+  window.addEventListener('message', onRender);
+  parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1 }, '*');
+  sendHeight();
+})();
+</script>
+</body>
+</html>

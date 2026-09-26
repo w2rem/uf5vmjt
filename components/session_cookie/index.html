@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<!-- uf5 session cookie: applies set/clear cookie actions from Python.
+     Self-contained custom component (no build step). Speaks the Streamlit
+     iframe protocol by hand: componentReady / render / setComponentValue /
+     setFrameHeight. Streamlit cannot write cookies itself
+     (st.context.cookies is read-only), so this tiny JS bridge does it.
+     The cookie value is an HMAC-signed expiry timestamp minted by Python;
+     tampering fails server-side validation. Comments in English only. -->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: transparent; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  function sendHeight(h) {
+    parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: h }, '*');
+  }
+
+  function done(v) {
+    parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setComponentValue', value: v, dataType: 'json' }, '*');
+  }
+
+  function apply(args) {
+    var action = args.action || 'noop';
+    var name = args.name || 'uf5sess';
+    if (action === 'set') {
+      var parts = name + '=' + encodeURIComponent(args.value || '') +
+        ';path=/;max-age=' + (args.max_age || 1800) + ';SameSite=Lax';
+      if (window.location.protocol === 'https:') parts += ';Secure';
+      document.cookie = parts;
+      done('set');
+    } else if (action === 'clear') {
+      document.cookie = name + '=;path=/;max-age=0;SameSite=Lax';
+      done('cleared');
+    } else {
+      done('noop');
+    }
+    sendHeight(0);
+  }
+
+  function onRender(event) {
+    // NOTE: Streamlit posts render as a bare {type, args, ...} with NO
+    // isStreamlitMessage flag (verified in the frontend bundle). Gate on
+    // type only; the flag is required solely for iframe->parent messages.
+    var data = event.data;
+    if (!data || data.type !== 'streamlit:render') return;
+    apply(data.args || {});
+  }
+
+  window.addEventListener('message', onRender);
+  parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1 }, '*');
+  sendHeight(0);
+})();
+</script>
+</body>
+</html>
