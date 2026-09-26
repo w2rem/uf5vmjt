@@ -9,13 +9,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.core.config import (COLOR_BORDER, COLOR_MEM_OTHER,  # noqa: E402
-                             COLOR_OURS)
+from lib.core.config import (COLOR_BORDER, COLOR_MEM_FREE,  # noqa: E402
+                             COLOR_MEM_OTHER, COLOR_OURS)
 from lib.sections.stats import (PROCESS_REFRESH_DEFAULT,  # noqa: E402
                                 PROCESS_REFRESH_MAX, PROCESS_REFRESH_MIN,
-                                ROLE_LABEL, _float_history, _live_cpu_split,
+                                ROLE_LABEL, _affinity_narrows,
+                                _float_history, _live_cpu_split,
                                 _live_per_process, process_refresh_seconds,
-                                render_core_bars, render_our_load_bar)
+                                render_core_bars, render_memory_track,
+                                render_split_load_bar)
 from lib.services import procs  # noqa: E402
 from lib.services.limits import effective_cores  # noqa: E402
 
@@ -176,14 +178,21 @@ class ColorFamilyTests(unittest.TestCase):
         self.assertNotEqual(COLOR_OURS, COLOR_MEM_OTHER)
         self.assertNotEqual(COLOR_OURS, COLOR_BORDER)
 
-    def test_our_load_bar_is_green(self):
-        html = render_our_load_bar(50.0)
+    def test_split_load_bar_is_green_for_ours(self):
+        html = render_split_load_bar(20.0, 5.0, 75.0)
         self.assertIn(COLOR_OURS, html)
-        self.assertIn("height:50.0%", html)
+        self.assertIn("width:20.0%", html)
+        self.assertIn("Rest of host", html)
 
-    def test_our_load_bar_clamps(self):
-        self.assertIn("height:100.0%", render_our_load_bar(250.0))
-        self.assertIn("height:0.0%", render_our_load_bar(-10.0))
+    def test_split_load_bar_clamps_to_100(self):
+        html = render_split_load_bar(80.0, 50.0, 50.0)
+        widths = [float(w.split("%")[0]) for w in
+                  re.findall(r"width:([\d.]+)%", html)]
+        self.assertLessEqual(sum(widths), 100.01, f"segments must not overflow: {widths}")
+
+    def test_split_load_bar_clamps_negatives(self):
+        html = render_split_load_bar(-5.0, -1.0, 10.0)
+        self.assertIn("width:0.0%", html)
 
 
 class ProcessRefreshTests(unittest.TestCase):
@@ -273,6 +282,58 @@ class NameResolutionTests(unittest.TestCase):
                          if "tests" not in p.parts)
         for name in sorted(n for n in dir(cfg) if n.startswith("COLOR_")):
             self.assertIn(name, blob, f"{name} declared in config but never used")
+
+
+class AffinitySplitTests(unittest.TestCase):
+    """A per-core row is ours only when the affinity mask proves it."""
+
+    def test_affinity_narrows_only_with_partial_mask(self):
+        self.assertTrue(_affinity_narrows("affinity", ours=2, visible=16))
+        self.assertFalse(_affinity_narrows("affinity", ours=16, visible=16))
+        self.assertFalse(_affinity_narrows("affinity", ours=0, visible=16))
+
+    def test_quota_or_override_is_not_proof_of_placement(self):
+        # Cloud reports affinity=whole host plus a declared quota; that quota is
+        # not evidence that any particular /proc/stat row is ours.
+        self.assertFalse(_affinity_narrows("quota", ours=2, visible=16))
+        self.assertFalse(_affinity_narrows("override", ours=2, visible=16))
+        self.assertFalse(_affinity_narrows("host", ours=16, visible=16))
+
+    def test_no_green_bars_when_mask_is_whole_host(self):
+        bars = render_core_bars({"cpu0": 80.0, "cpu1": 82.0}, {}, limit=0)
+        self.assertEqual(len(bars), 2)
+        for bar in bars:
+            self.assertNotIn(COLOR_OURS, bar, "no row may be ours without proof")
+
+    def test_green_only_first_rows_when_mask_narrows(self):
+        bars = render_core_bars({"cpu0": 5.0, "cpu1": 5.0, "cpu2": 5.0}, {}, limit=2)
+        self.assertIn(COLOR_OURS, bars[0])
+        self.assertIn(COLOR_OURS, bars[1])
+        self.assertNotIn(COLOR_OURS, bars[2])
+
+
+class MemoryTrackTests(unittest.TestCase):
+    def test_segments_are_measured_against_base(self):
+        segs = [("Ours", 2765, COLOR_OURS), ("Free", 7235, COLOR_MEM_FREE)]
+        html = render_memory_track(segs, base=10000)
+        widths = [float(w.split("%")[0]) for w in re.findall(r"width:([\d.]+)%", html)]
+        self.assertAlmostEqual(widths[0], 27.65, places=1)
+        self.assertAlmostEqual(widths[1], 72.35, places=1)
+        self.assertAlmostEqual(sum(widths), 100.0, places=1)
+
+    def test_segments_never_overflow_base(self):
+        segs = [("Ours", 9000, COLOR_OURS), ("Other", 9000, COLOR_MEM_OTHER)]
+        html = render_memory_track(segs, base=10000)
+        widths = [float(w.split("%")[0]) for w in re.findall(r"width:([\d.]+)%", html)]
+        self.assertLessEqual(sum(widths), 100.01, widths)
+
+    def test_negative_values_render_zero(self):
+        html = render_memory_track([("Ours", -500, COLOR_OURS)], base=1000)
+        self.assertIn("width:0.00%", html)
+
+    def test_zero_base_does_not_divide_by_zero(self):
+        html = render_memory_track([("Ours", 100, COLOR_OURS)], base=0)
+        self.assertIn("width:", html)
 
 
 if __name__ == "__main__":

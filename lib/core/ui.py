@@ -106,10 +106,15 @@ def inject_style() -> None:
             background: {COLOR_ACCENT_PALE}; color: {COLOR_TEXT};
             border-color: {COLOR_ACCENT_SOFT};
         }}
-        /* Water-fill CPU bars: fresh nodes animate 0 -> value every tick. */
-        .uf5-row {{ display: flex; align-items: flex-end; gap: 10px; }}
-        .uf5-col {{ flex: 1; display: flex; flex-direction: column; align-items: center; }}
-        .uf5-track {{ width: 100%; max-width: 56px; height: 200px;
+        /* Water-fill CPU bars: fresh nodes animate 0 -> value every tick.
+           The track is viewport-relative so 16 cores on a wide screen and 4 on
+           a narrow one both fill the width in a single row, and its height
+           scales with the viewport instead of a fixed 200px. */
+        .uf5-row {{ display: flex; align-items: flex-end; gap: clamp(2px, .5vw, 10px);
+                    width: 100%; }}
+        .uf5-col {{ flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+                    align-items: center; }}
+        .uf5-track {{ width: 100%; max-width: 100%; height: clamp(90px, 22vh, 220px);
                       background: {COLOR_ACCENT_PALE}; border-radius: 8px;
                       position: relative; overflow: hidden; }}
         .uf5-fill {{ position: absolute; bottom: 0; left: 0; right: 0;
@@ -117,8 +122,11 @@ def inject_style() -> None:
                      border-radius: 8px; transform-box: fill-box; transform-origin: bottom;
                      animation: uf5fill .9s cubic-bezier(.22,.8,.3,1) backwards;
                      transition: height .9s cubic-bezier(.22,.8,.3,1); }}
-        .uf5-cap {{ margin-top: 6px; font-size: 11px; color: {COLOR_MUTED}; }}
-        .uf5-val {{ font-size: 11px; font-weight: 700; color: {COLOR_TEXT}; margin-bottom: 2px; }}
+        .uf5-cap {{ margin-top: 6px; font-size: clamp(8px, .8vw, 11px); color: {COLOR_MUTED};
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                    max-width: 100%; }}
+        .uf5-val {{ font-size: clamp(8px, .8vw, 11px); font-weight: 700; color: {COLOR_TEXT};
+                    margin-bottom: 2px; }}
         @keyframes uf5fill {{ from {{ transform: scaleY(0); }} to {{ transform: scaleY(1); }} }}
         /* Drop ghost: gray zone marking how much a bar fell, decrease-only. */
         .uf5-ghost {{ position: absolute; left: 0; right: 0;

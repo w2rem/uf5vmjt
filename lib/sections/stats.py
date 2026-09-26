@@ -42,49 +42,73 @@ def render_memory_bar() -> None:
     ceiling_bytes, mem_source = effective_memory_bytes()
     ceiling_kb = ceiling_bytes // 1024
     limited = mem_source in ("quota", "override") and 0 < ceiling_kb < total
-    shown_total = ceiling_kb if limited else total
 
+    # Two tracks with two different denominators, because they are two
+    # different questions: how much of our 2.7GB quota do we burn, and how much
+    # of the host's 128GB is in use. Squeezing both onto one bar is what made
+    # our 176MB read as 0.1%. Page cache is excluded from "active" on both —
+    # it is reclaimable, not consumption.
     census = procs.census()
-    our_rss_kb = sum(p.rss_kb for p in census if p.is_ours)
-    other_rss_kb = sum(p.rss_kb for p in census if not p.is_ours)
-    our_rss_kb = max(0, min(our_rss_kb, shown_total))
-    other_rss_kb = max(0, min(other_rss_kb, shown_total - our_rss_kb))
+    our_rss_kb = max(0, sum(p.rss_kb for p in census if p.is_ours))
+    other_pids_kb = max(0, sum(p.rss_kb for p in census if not p.is_ours))
+    host_active_kb = max(0, used - cache)
 
-    if limited:
-        # The host's "used" covers every tenant and cannot be split. Show our
-        # processes plus the pids we could not attribute, and let the rest of
-        # the quota read as headroom.
-        segs = [("Ours", our_rss_kb, COLOR_OURS),
-                ("Other pids", other_rss_kb, COLOR_MEM_OTHER),
-                ("Headroom", max(shown_total - our_rss_kb - other_rss_kb, 0), COLOR_MEM_FREE)]
-    else:
-        segs = [("Ours", min(our_rss_kb, shown_total), COLOR_OURS),
-                ("Used", max(used - our_rss_kb, 0), COLOR_MEM_OTHER),
-                ("Cache", cache, COLOR_MEM_CACHE),
-                ("Free", max(free - our_rss_kb, 0), COLOR_MEM_FREE)]
+    st.markdown(
+        f'<div style="color:{COLOR_MUTED};font-size:11px;margin:8px 0 2px">'
+        f'our container · {fmt_mb(ceiling_kb if limited else total)} quota · active (no cache)</div>',
+        unsafe_allow_html=True)
+    our_base = ceiling_kb if limited else total
+    our_segs = [("Ours", min(our_rss_kb, our_base), COLOR_OURS),
+                ("Other pids", max(0, min(other_pids_kb, our_base - our_rss_kb)), COLOR_MEM_OTHER),
+                ("Free", max(0, our_base - our_rss_kb - other_pids_kb), COLOR_MEM_FREE)]
+    st.markdown(render_memory_track(our_segs, our_base), unsafe_allow_html=True)
 
-    bar = "".join(
-        f'<div class="uf5-memseg" title="{label} {fmt_mb(v)} ({v / shown_total * 100:.1f}%)" '
-        f'style="width:{v / shown_total * 100:.2f}%;background:{color}"></div>'
-        for label, v, color in segs
-    )
-    st.markdown(f'<div class="uf5-memtrack">{bar}</div>', unsafe_allow_html=True)
-    legend = "".join(
-        f'<span><span class="uf5-dot" style="background:{color}"></span>'
-        f'{label} <b>{fmt_mb(v)}</b> {v / shown_total * 100:.1f}%</span>'
-        for label, v, color in segs
-    )
-    st.markdown(f'<div class="uf5-legend">{legend}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="color:{COLOR_MUTED};font-size:11px;margin:12px 0 2px">'
+        f'the host · {fmt_gb(total * 1024)} total · active {fmt_mb(host_active_kb)} '
+        f'· cache {fmt_mb(cache)} not counted</div>', unsafe_allow_html=True)
+    host_segs = [("Ours", min(our_rss_kb, total), COLOR_OURS),
+                ("Other tenants", max(0, min(host_active_kb - our_rss_kb, total - our_rss_kb)), COLOR_MEM_OTHER),
+                ("Cache", min(cache, max(0, total - host_active_kb)), COLOR_MEM_CACHE),
+                ("Free", max(0, total - host_active_kb - cache), COLOR_MEM_FREE)]
+    st.markdown(render_memory_track(host_segs, total), unsafe_allow_html=True)
+
     c1, c2, c3 = st.columns(3)
-    if limited:
-        c1.metric("Quota", fmt_mb(shown_total), f"host has {fmt_gb(total * 1024)}", delta_color="off")
-    else:
-        c1.metric("Total", fmt_mb(total), "capacity", delta_color="off")
-    c2.metric("Our RAM", fmt_mb(our_rss_kb), f"{our_rss_kb / shown_total * 100:.1f}% of quota")
-    if limited:
-        c3.metric("Host used", fmt_mb(used), "all tenants, not ours", delta_color="off")
-    else:
-        c3.metric("Free", fmt_mb(free), f"{free / total * 100:.1f}% of host")
+    quota_kb = ceiling_kb if limited else total
+    c1.metric("Our quota", fmt_mb(quota_kb),
+              f"{our_rss_kb / quota_kb * 100:.1f}% used by us" if quota_kb else "n/a")
+    c2.metric("Host active", fmt_mb(host_active_kb),
+              f"{host_active_kb / total * 100:.1f}% of {fmt_gb(total * 1024)}", delta_color="off")
+    c3.metric("Host cache", fmt_mb(cache), "reclaimable, not counted", delta_color="off")
+
+
+def render_memory_track(segs: list[tuple[str, int, str]], base: int) -> str:
+    """One stacked memory track with a legend; `base` is the denominator in kB.
+
+    Kept pure so the segment arithmetic is testable without Streamlit. Segments
+    are clipped cumulatively: callers pass raw RSS sums that can exceed the
+    base (a container's RSS is counted per process, so shared pages are double
+    counted), and an overflowing stack would silently overflow the track.
+    """
+    total = max(int(base), 1)
+    parts = []
+    legend = []
+    remaining = total
+    for label, value_kb, color in segs:
+        value = max(0, int(value_kb))
+        value = min(value, remaining)
+        remaining -= value
+        pct = value / total * 100.0
+        parts.append(
+            f'<div class="uf5-memseg" title="{label} {fmt_mb(value)} ({pct:.1f}%)" '
+            f'style="width:{pct:.2f}%;background:{color}"></div>'
+        )
+        legend.append(
+            f'<span><span class="uf5-dot" style="background:{color}"></span>'
+            f'{label} <b>{fmt_mb(value)}</b> {pct:.1f}%</span>'
+        )
+    return (f'<div class="uf5-memtrack">{"".join(parts)}</div>'
+            f'<div class="uf5-legend">{"".join(legend)}</div>')
 
 
 def _float_history(raw: Any) -> dict[str, float]:
@@ -265,20 +289,26 @@ def render_cpu_panel() -> None:
     m2.metric("Other pids", f"{other_core_pct:.1f}%", f"{their_rss_mb:.0f} MB not ours", delta_color="off")
     m3.metric("Host per-core", f"{host_avg:.1f}%", "all tenants, not ours", delta_color="off")
 
-    # Our own load as a share of the quota: this is the only CPU figure the
-    # container can measure truthfully, and it is what the operator acts on.
+    # One track, two owners: our processes in green, the rest of the host in
+    # blue. Both measured — ours from /proc/<pid>/stat inside the container,
+    # the host share from the per-core average scaled to the whole machine.
+    host_share = round(max(0.0, 100.0 - our_core_pct - other_core_pct), 1)
     st.markdown(
         f'<div style="color:{COLOR_MUTED};font-size:11px;margin:10px 0 2px">'
-        f'our load, of {ours} core quota</div>', unsafe_allow_html=True)
-    st.markdown(render_our_load_bar(our_core_pct), unsafe_allow_html=True)
+        f'who is using the host right now</div>', unsafe_allow_html=True)
+    st.markdown(render_split_load_bar(our_core_pct, other_core_pct, host_share),
+                unsafe_allow_html=True)
 
     if per_core:
-        # The per-core rows come from /proc/stat, which is host-wide. When the
-        # platform narrowed our affinity mask the first `ours` rows are ours;
-        # when it did not (Cloud without cpuset) no row is attributable to us,
-        # so the chart is labelled as host-wide instead of claiming a split.
-        split = source in ("quota", "override") and ours < len(per_core)
-        limit = ours if split else len(per_core)
+        # The per-core rows come from /proc/stat, which is host-wide. A row is
+        # ours only when the platform narrowed our affinity mask to exactly
+        # `ours` CPUs — then the first `ours` rows are demonstrably ours. When
+        # the mask is the whole host (Cloud without cpuset) NO row is
+        # attributable to us, so zero bars get our green. Painting them all
+        # green (the earlier `limit = len(per_core)` fallback) was worse than
+        # useless: it claimed 16 green cores for a 2-core quota.
+        split = _affinity_narrows(source, ours, len(per_core))
+        limit = ours if split else 0
         prev = _float_history(st.session_state.get("uf5_cpu_prev"))
         bars = render_core_bars(per_core, prev, limit)
         st.session_state["uf5_cpu_prev"] = dict(per_core)
@@ -292,9 +322,9 @@ def render_cpu_panel() -> None:
         else:
             st.markdown(
                 f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
-                f'host per-core load — the platform does not narrow our view to our {ours} core(s), '
-                f'so these {len(per_core)} rows include other tenants. Our own load is the bar above.</div>',
-                unsafe_allow_html=True)
+                f'host per-core load, all {len(per_core)} cores · the platform does not narrow our '
+                f'view to our {ours}, so no row here is ours. Our own load is the green bar above.'
+                f'</div>', unsafe_allow_html=True)
 
 
 PROCESS_REFRESH_DEFAULT = 5
@@ -318,19 +348,40 @@ def process_refresh_seconds(st: Any) -> int:
     return max(PROCESS_REFRESH_MIN, min(PROCESS_REFRESH_MAX, value))
 
 
-def render_our_load_bar(pct: float) -> str:
-    """Single green track for our processes' share of the core quota.
+def _affinity_narrows(source: str, ours: int, visible: int) -> bool:
+    """True only when we can prove which per-core rows are ours.
 
-    The per-core chart below is host-wide and mostly other tenants' work; this
-    is the number that is actually ours, measured from /proc/<pid>/stat inside
-    the container. Green is reserved for it.
+    The affinity mask is the only evidence: if it lists exactly `visible` CPUs
+    the platform never narrowed us, and no row can be attributed. Declaring a
+    quota or an override is not proof of placement, so those do not enable the
+    split.
     """
-    value = max(0.0, min(float(pct), 100.0))
-    return (
-        f'<div class="uf5-track" style="border-radius:8px">'
-        f'<div class="uf5-fill" style="height:{value:.1f}%;'
-        f'background:{COLOR_OURS};border-radius:8px"></div></div>'
+    return source == "affinity" and 0 < ours < visible
+
+
+def render_split_load_bar(ours_pct: float, other_pct: float, host_pct: float) -> str:
+    """Horizontal track: our processes green, other pids blue, rest of the host
+    pale. A full-width bar, not a column — a lone 200px column next to the
+    per-core chart read as a seventeenth core.
+    """
+    ours = max(0.0, min(float(ours_pct), 100.0))
+    other = max(0.0, min(float(other_pct), 100.0 - ours))
+    host = max(0.0, min(float(host_pct), 100.0 - ours - other))
+    segs = [("Ours", ours, COLOR_OURS),
+            ("Other pids", other, COLOR_MEM_OTHER),
+            ("Rest of host", host, COLOR_MEM_CACHE)]
+    bar = "".join(
+        f'<div class="uf5-memseg" title="{label} {value:.1f}%" '
+        f'style="width:{value:.1f}%;background:{color}"></div>'
+        for label, value, color in segs
     )
+    legend = "".join(
+        f'<span><span class="uf5-dot" style="background:{color}"></span>'
+        f'{label} <b>{value:.1f}%</b></span>'
+        for label, value, color in segs
+    )
+    return (f'<div class="uf5-memtrack" style="height:22px">{bar}</div>'
+            f'<div class="uf5-legend">{legend}</div>')
 
 
 def _live_per_process(st: Any) -> dict[int, float]:
