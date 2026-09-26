@@ -2,6 +2,7 @@
 from __future__ import annotations
 import html
 import re
+from typing import Any
 from lib.core.config import (COLOR_ACCENT, COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MEM_FREE,
                              COLOR_MEM_USED, COLOR_MUTED, COLOR_TEXT)
 from lib.core.ui import badge
@@ -68,6 +69,54 @@ def render_memory_bar() -> None:
               "other tenants share this host" if limited else "of host total")
 
 
+def _float_history(raw: Any) -> dict[str, float]:
+    """Keep only numeric entries from a session-state history blob.
+
+    Regression guard: this key once held raw (total, idle) jiffies tuples, and
+    a later revision read it as percentages — min() on a tuple is a TypeError
+    that took down the whole CPU panel. A session can also survive a redeploy
+    carrying the old shape, so anything non-numeric is dropped rather than
+    trusted.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {k: float(v) for k, v in raw.items() if isinstance(v, (int, float))}
+
+
+def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: int) -> list[str]:
+    """Per-core water-fill bars with a drop ghost, ours in accent, host's pale.
+
+    A bar that fell since the last tick keeps the lost portion in gray until
+    the next tick melts it away, which reads as motion instead of a jump.
+    """
+    bars: list[str] = []
+    for i, (name, value) in enumerate(per_core.items()):
+        label = re.sub(r"[^a-z0-9]", "", name.lower()) or f"c{i}"
+        pct = max(min(float(value), 100.0), 0.0)
+        before = prev.get(name)
+        drop = max(min(float(before), 100.0) - pct, 0.0) if isinstance(before, (int, float)) else 0.0
+        has_ghost = drop >= 0.5
+        ours_core = i < limit
+        fill = COLOR_ACCENT if ours_core else COLOR_BORDER
+        value_color = COLOR_TEXT if ours_core else COLOR_MUTED
+        # Flush joint: flat top hugged by the ghost, no seam.
+        fill_radius = "0 0 8px 8px" if has_ghost else "8px"
+        ghost = (
+            f'<div class="uf5-ghost" '
+            f'style="bottom:{pct:.1f}%;height:{drop:.1f}%"></div>'
+            if has_ghost else ""
+        )
+        bars.append(
+            f'<div class="uf5-col"><div class="uf5-val" style="color:{value_color}">{pct:.0f}</div>'
+            f'<div class="uf5-track"><div class="uf5-fill" '
+            f'style="height:{pct:.1f}%;background:{fill};'
+            f'animation-delay:{i * 70}ms;border-radius:{fill_radius}"></div>'
+            f'{ghost}</div>'
+            f'<div class="uf5-cap">{label}</div></div>'
+        )
+    return bars
+
+
 def render_cpu_panel() -> None:
     """CPU model, core counts, per-core bars + our-process figures.
 
@@ -102,7 +151,6 @@ def render_cpu_panel() -> None:
     total_now, idle_now = read_cpu_total()
     prev = st.session_state.get("uf5_cpu_prev_sample")
     st.session_state["uf5_cpu_prev_sample"] = {"cores": dict(snap_now), "total": (total_now, idle_now)}
-    st.session_state["uf5_cpu_prev"] = dict(snap_now)
     per_core: dict[str, float] = {}
     host_avg = 0.0
     if prev:
@@ -138,36 +186,9 @@ def render_cpu_panel() -> None:
     m3.metric("Host load", f"{host_avg:.1f}%", "includes other tenants", delta_color="off")
 
     if per_core:
-        # Water-fill bars + drop ghost: when a bar decreases, the lost portion
-        # stays visible in gray until the next tick melts it away.
-        # Cores inside our quota are filled in the accent colour; the rest of
-        # the host's cores stay pale so the split is visible at a glance.
         limit = ours if source != "host" else len(per_core)
-        prev = st.session_state.get("uf5_cpu_prev", {})
-        bars = []
-        for i, (name, value) in enumerate(per_core.items()):
-            label = re.sub(r"[^a-z0-9]", "", name.lower()) or f"c{i}"
-            pct = max(min(value, 100), 0)
-            drop = max(min(prev.get(name, value), 100) - pct, 0)
-            has_ghost = drop >= 0.5
-            ours_core = i < limit
-            fill = COLOR_ACCENT if ours_core else COLOR_BORDER
-            value_color = COLOR_TEXT if ours_core else COLOR_MUTED
-            # Flush joint: flat top hugged by the ghost, no seam.
-            fill_radius = "0 0 8px 8px" if has_ghost else "8px"
-            ghost = (
-                f'<div class="uf5-ghost" '
-                f'style="bottom:{pct:.1f}%;height:{drop:.1f}%"></div>'
-                if has_ghost else ""
-            )
-            bars.append(
-                f'<div class="uf5-col"><div class="uf5-val" style="color:{value_color}">{value:.0f}</div>'
-                f'<div class="uf5-track"><div class="uf5-fill" '
-                f'style="height:{pct:.1f}%;background:{fill};'
-                f'animation-delay:{i * 70}ms;border-radius:{fill_radius}"></div>'
-                f'{ghost}</div>'
-                f'<div class="uf5-cap">{label}</div></div>'
-            )
+        prev = _float_history(st.session_state.get("uf5_cpu_prev"))
+        bars = render_core_bars(per_core, prev, limit)
         st.session_state["uf5_cpu_prev"] = dict(per_core)
         st.markdown(f'<div class="uf5-row">{"".join(bars)}</div>',
                     unsafe_allow_html=True)
