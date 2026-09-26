@@ -1,10 +1,12 @@
 """uf5vmjt.lib.sections.stats — stats section."""
 from __future__ import annotations
 import html
+import os
 import re
+import time
 from typing import Any
-from lib.core.config import (COLOR_ACCENT, COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MEM_FREE,
-                             COLOR_MEM_USED, COLOR_MUTED, COLOR_TEXT)
+from lib.core.config import (COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MEM_FREE,
+                             COLOR_MEM_USED, COLOR_MUTED, COLOR_OURS, COLOR_TEXT)
 from lib.core.ui import badge
 from lib.services import procs
 from lib.services.disk import render_disk_panel
@@ -97,7 +99,7 @@ def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: 
         drop = max(min(float(before), 100.0) - pct, 0.0) if isinstance(before, (int, float)) else 0.0
         has_ghost = drop >= 0.5
         ours_core = i < limit
-        fill = COLOR_ACCENT if ours_core else COLOR_BORDER
+        fill = COLOR_OURS if ours_core else COLOR_BORDER
         value_color = COLOR_TEXT if ours_core else COLOR_MUTED
         # Flush joint: flat top hugged by the ghost, no seam.
         fill_radius = "0 0 8px 8px" if has_ghost else "8px"
@@ -115,6 +117,64 @@ def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: 
             f'<div class="uf5-cap">{label}</div></div>'
         )
     return bars
+
+
+def _live_cpu_split(st: Any, cores: int) -> tuple[float, float]:
+    """Live CPU of our pids and of the others, as percent of the quota.
+
+    Deltas the previous tick's jiffies against this tick's, so a checker
+    burning a core right now reads 100% instead of a lifetime average that
+    rounds it away. Processes without a baseline are skipped: there is no
+    measurement for them, and inventing one would overstate the load.
+
+    Both figures come from one sample and one window, so they are comparable.
+    """
+    now = procs.sample()
+    prev = st.session_state.get("uf5_our_cpu_prev")
+    st.session_state["uf5_our_cpu_prev"] = dict(now)
+    window = _tick_window(st)
+    if not prev or cores <= 0 or window <= 0:
+        return 0.0, 0.0
+    ours_pids = {p.pid for p in procs.census() if p.is_ours}
+    hz = float(_clock_ticks())
+    our_jiffies = 0.0
+    other_jiffies = 0.0
+    for pid, (_comm, utime, stime) in now.items():
+        old = prev.get(pid)
+        if old is None:
+            continue
+        delta = (utime + stime) - (old[1] + old[2])
+        if delta <= 0:
+            continue
+        if pid in ours_pids:
+            our_jiffies += delta
+        else:
+            other_jiffies += delta
+    scale = 100.0 / hz / window / cores
+    return (round(max(0.0, min(our_jiffies * scale, 100.0)), 1),
+            round(max(0.0, min(other_jiffies * scale, 100.0)), 1))
+
+
+def _clock_ticks() -> int:
+    try:
+        return int(os.sysconf("SC_CLK_TCK")) or 100
+    except (ValueError, OSError, AttributeError):
+        return 100
+
+
+def _tick_window(st: Any) -> float:
+    """Seconds since the previous tick.
+
+    Returns 0.0 on the very first call — there is no baseline yet, so a rate
+    cannot be computed and the caller must not pretend otherwise. The fragment
+    ticks every 2s, so by the second call a real window exists.
+    """
+    now = time.time()
+    stamp = st.session_state.get("uf5_our_cpu_at")
+    st.session_state["uf5_our_cpu_at"] = now
+    if stamp is None:
+        return 0.0
+    return max(now - stamp, 0.001)
 
 
 def render_cpu_panel() -> None:
@@ -175,28 +235,76 @@ def render_cpu_panel() -> None:
     census = procs.census()
     ours_rows = [p for p in census if p.is_ours]
     their_rows = [p for p in census if not p.is_ours]
-    our_core_pct = round(min(sum(p.cpu_pct for p in ours_rows) / ours, 100.0), 1) if ours else 0.0
-    their_core_pct = round(min(sum(p.cpu_pct for p in their_rows) / ours, 100.0), 1) if ours else 0.0
+    # Our CPU is a live delta between the previous tick and this one, not a
+    # lifetime average: the operator needs to see the checker burning a core
+    # right now. Lifetime stays in the Processes tab, where it is the useful
+    # number. A process with no baseline (started after the last tick) cannot
+    # be measured and is excluded rather than counted as zero.
+    our_core_pct, other_core_pct = _live_cpu_split(st, ours)
     our_rss_mb = sum(p.rss_kb for p in ours_rows) / 1024
     their_rss_mb = sum(p.rss_kb for p in their_rows) / 1024
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Our CPU", f"{our_core_pct}%", f"{their_core_pct}% other pids", delta_color="off")
-    m2.metric("Our RAM", f"{our_rss_mb:.0f} MB", f"{their_rss_mb:.0f} MB other pids", delta_color="off")
-    m3.metric("Host load", f"{host_avg:.1f}%", "includes other tenants", delta_color="off")
+    m1.metric("Our CPU", f"{our_core_pct:.1f}%", f"of {ours} core(s)", delta_color="off")
+    m2.metric("Other pids", f"{other_core_pct:.1f}%", f"{their_rss_mb:.0f} MB not ours", delta_color="off")
+    m3.metric("Host per-core", f"{host_avg:.1f}%", "all tenants, not ours", delta_color="off")
 
     if per_core:
-        limit = ours if source != "host" else len(per_core)
+        # Which bars we own depends on whether the platform actually narrowed
+        # our affinity mask. When it did not (Cloud, --cpus without --cpuset)
+        # every visible core is marked as ours, which is worse than useless —
+        # so the chart is labelled honestly instead of claiming a split.
+        split = source in ("quota", "override") and ours < len(per_core)
+        limit = ours if split else len(per_core)
         prev = _float_history(st.session_state.get("uf5_cpu_prev"))
         bars = render_core_bars(per_core, prev, limit)
         st.session_state["uf5_cpu_prev"] = dict(per_core)
         st.markdown(f'<div class="uf5-row">{"".join(bars)}</div>',
                     unsafe_allow_html=True)
-        if source != "host":
+        if split:
             st.markdown(
                 f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
-                f'first {limit} cores are ours (accent) · the rest are other tenants on this host (pale)</div>',
+                f'first {limit} cores are ours (green) · the rest are other tenants (pale)</div>',
                 unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
+                f'per-core load for the whole host — the platform does not narrow our view to '
+                f'our {ours} core(s), so these numbers include other tenants</div>',
+                unsafe_allow_html=True)
+
+
+def _live_per_process(st: Any) -> dict[int, float]:
+    """Per-pid CPU over the last fragment period, as a percent of one core.
+
+    Separate keys from _live_cpu_split because the two fragments tick on
+    different cadences (2s for the CPU panel, 5s for this table); sharing a
+    baseline would make one of them measure across a window it never observed.
+    A pid with no baseline returns nothing for that tick — an em dash, not a
+    fabricated zero.
+    """
+    now = procs.sample()
+    prev = st.session_state.get("uf5_proc_cpu_prev")
+    st.session_state["uf5_proc_cpu_prev"] = dict(now)
+    stamp = st.session_state.get("uf5_proc_cpu_at")
+    at = time.time()
+    st.session_state["uf5_proc_cpu_at"] = at
+    if prev is None or stamp is None:
+        return {}
+    window = at - stamp
+    if window <= 0:
+        return {}
+    hz = float(_clock_ticks())
+    out: dict[int, float] = {}
+    for pid, (_comm, utime, stime) in now.items():
+        old = prev.get(pid)
+        if old is None:
+            continue
+        delta = (utime + stime) - (old[1] + old[2])
+        if delta < 0:
+            continue
+        out[pid] = round((delta / hz) / window * 100.0, 1)
+    return out
 
 
 ROLE_LABEL = {
@@ -234,24 +342,29 @@ def render_processes() -> None:
             return
         # effective_cores returns (cores, source) — two values, not three.
         ours, _source = effective_cores()
+        live_pct = _live_per_process(st)
         head = (
             f'<tr><th style="text-align:left;padding:0 12px 4px 0;color:{COLOR_MUTED};'
             f'font-weight:500">pid</th>'
             f'<th style="text-align:left;padding:0 12px 4px 0;color:{COLOR_MUTED};font-weight:500">what it is</th>'
             f'<th style="text-align:right;padding:0 12px 4px 0;color:{COLOR_MUTED};font-weight:500">RAM</th>'
-            f'<th style="text-align:right;padding:0 0 4px 0;color:{COLOR_MUTED};font-weight:500">CPU of 1 core</th></tr>'
+            f'<th style="text-align:right;padding:0 12px 4px 0;color:{COLOR_MUTED};font-weight:500">CPU now</th>'
+            f'<th style="text-align:right;padding:0 0 4px 0;color:{COLOR_MUTED};font-weight:500">CPU avg</th></tr>'
         )
         body = ""
         for p in census:
-            accent = COLOR_ACCENT if p.is_ours else COLOR_BORDER
+            accent = COLOR_OURS if p.is_ours else COLOR_BORDER
             role = ROLE_LABEL.get(p.role, p.role)
+            now_pct = live_pct.get(p.pid)
+            now_cell = ("—" if now_pct is None else f"{now_pct:.1f}%")
             body += (
                 f'<tr><td style="padding:3px 12px 3px 0;color:{COLOR_MUTED}">{p.pid}</td>'
                 f'<td style="padding:3px 12px 3px 0">'
                 f'<span style="color:{accent}">●</span> {html.escape(p.comm)}'
                 f'<div style="color:{COLOR_MUTED};font-size:11px">{html.escape(role)}</div></td>'
                 f'<td style="padding:3px 12px 3px 0;text-align:right">{p.rss_kb / 1024:.0f} MB</td>'
-                f'<td style="padding:3px 0 3px 0;text-align:right">{p.cpu_pct:.1f}%</td></tr>'
+                f'<td style="padding:3px 12px 3px 0;text-align:right">{now_cell}</td>'
+                f'<td style="padding:3px 0 3px 0;text-align:right;color:{COLOR_MUTED}">{p.cpu_pct:.1f}%</td></tr>'
             )
         total_mb = sum(p.rss_kb for p in census) / 1024
         st.markdown(
@@ -261,6 +374,7 @@ def render_processes() -> None:
             f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:8px">'
             f'● ours — Go worker, tailscaled, Streamlit, Python · quota is {ours} core(s)</div>'
             f'<div style="color:{COLOR_MUTED};font-size:11px">'
+            f'CPU now = last 5s · CPU avg = since the process started · '
             f'{len(census)} pids · {total_mb:.0f} MB resident (shared pages counted per process)</div>'
             f'</div>',
             unsafe_allow_html=True)
