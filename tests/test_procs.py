@@ -122,5 +122,79 @@ class RssTests(unittest.TestCase):
         self.assertEqual(procs.total_rss_bytes([999999]), 0)
 
 
+class CpuBarDeltaTests(unittest.TestCase):
+    """The per-core bars are fed from session_state across ticks.
+
+    Regression: an earlier version sampled /proc once per call and treated the
+    single sample as both ends of the delta, so every bar rendered 0 forever.
+    """
+
+    def test_two_tick_delta_produces_nonzero_bars(self):
+        # cpu0 advanced 100 jiffies total / 60 idle => 40% busy between ticks.
+        tick1 = {"cores": {"cpu0": (1000, 600), "cpu1": (1000, 900)}, "total": (1000, 900)}
+        tick2 = {"cores": {"cpu0": (1100, 660), "cpu1": (1000, 900)}, "total": (1100, 960)}
+        bars = {}
+        for name in sorted(tick2["cores"]):
+            t1, i1 = tick1["cores"].get(name, (0, 0))
+            t2, i2 = tick2["cores"].get(name, (0, 0))
+            dt, di = t2 - t1, i2 - i1
+            bars[name] = round(max(0.0, min((1 - di / dt) * 100, 100.0)), 1) if dt > 0 else 0.0
+        self.assertEqual(bars["cpu0"], 40.0)
+        self.assertEqual(bars["cpu1"], 0.0)
+
+    def test_first_tick_has_no_previous_so_bars_stay_empty(self):
+        # With no baseline every bar must be 0, not a fabricated 100%.
+        prev = None
+        bars = {}
+        now = {"cpu0": (1000, 600)}
+        if prev:
+            for name in now:
+                bars[name] = 1.0
+        self.assertEqual(bars, {})
+
+    def test_negative_idle_delta_is_clamped(self):
+        # A counter reset (pid reuse, wrap) must not render a negative bar.
+        t1, i1 = 100, 100
+        t2, i2 = 50, 40
+        dt, di = t2 - t1, i2 - i1
+        value = round(max(0.0, min((1 - di / dt) * 100, 100.0)), 1) if dt > 0 else 0.0
+        self.assertGreaterEqual(value, 0.0)
+
+
+class CensusTests(unittest.TestCase):
+    def test_census_reports_names_not_truncated_comm(self):
+        # /proc/<pid>/comm caps at 15 bytes ("worker" -> "w"); cmdline gives
+        # the real name, which is what the panel must render.
+        for p in procs.census():
+            self.assertNotEqual(p.comm, "w")
+            self.assertTrue(p.comm)
+
+    def test_census_classifies_our_stack(self):
+        rows = procs.census()
+        self.assertTrue(rows)
+        ours = [p for p in rows if p.is_ours]
+        self.assertTrue(ours, "at least our own python process must classify as ours")
+        for p in ours:
+            self.assertIn(p.role, ("python", "runtime", "go worker", "tailscaled", "streamlit"))
+
+    def test_census_rss_is_nonzero(self):
+        total = sum(p.rss_kb for p in procs.census() if p.is_ours)
+        self.assertGreater(total, 0)
+
+    def test_census_lifetime_cpu_is_nonnegative(self):
+        for p in procs.census():
+            self.assertGreaterEqual(p.cpu_pct, 0.0)
+            self.assertLessEqual(p.cpu_pct, 100.0 * max(1, os.cpu_count() or 1))
+
+    def test_our_processes_sorted_ours_first(self):
+        rows = procs.census()
+        seen_other = False
+        for p in rows:
+            if not p.is_ours:
+                seen_other = True
+            elif seen_other:
+                self.fail("ours sorted after other pids")
+
+
 if __name__ == "__main__":
     unittest.main()

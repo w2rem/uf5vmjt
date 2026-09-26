@@ -2,13 +2,12 @@
 from __future__ import annotations
 import html
 import re
-import time
 from lib.core.config import (COLOR_ACCENT, COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MEM_FREE,
                              COLOR_MEM_USED, COLOR_MUTED, COLOR_TEXT)
 from lib.core.ui import badge
 from lib.services import procs
 from lib.services.disk import render_disk_panel
-from lib.services.limits import declared_vs_visible, effective_cores, effective_memory_bytes, our_cpu_ids
+from lib.services.limits import effective_cores, effective_memory_bytes, our_cpu_ids
 from lib.services.netinfo import flag_url, get_cluster, get_geo, shard_color
 from lib.services.sysinfo import cpu_info, fmt_gb, fmt_mb, memory_segments, read_cpu_times, read_cpu_total, read_meminfo
 from lib.services.versions import render_versions
@@ -31,9 +30,22 @@ def render_memory_bar() -> None:
         st.caption("memory info unavailable (no /proc/meminfo)")
         return
     ceiling, mem_source = effective_memory_bytes()
-    shown_total = ceiling if mem_source == "quota" and 0 < ceiling < total else total
-    segs = [("Used", used, COLOR_MEM_USED), ("Cache", cache, COLOR_MEM_CACHE),
-            ("Free", free, COLOR_MEM_FREE)]
+    limited = mem_source in ("quota", "override") and 0 < ceiling < total
+    shown_total = ceiling if limited else total
+    # Our own processes are the memory we are responsible for; the host's
+    # free/total is context. Mixing them produced the "we use 1.2% RAM" line:
+    # our RSS divided by the host's 128GB is arithmetically true and
+    # operationally useless.
+    census = procs.census()
+    our_rss_kb = sum(p.rss_kb for p in census if p.is_ours)
+    our_rss_kb = min(our_rss_kb, shown_total)
+    host_used_kb = min(used, shown_total) if limited else used
+    segs = [("Ours", our_rss_kb, COLOR_MEM_USED),
+            ("Host other", max(host_used_kb - our_rss_kb, 0), COLOR_MEM_CACHE),
+            ("Free", max(shown_total - host_used_kb, 0), COLOR_MEM_FREE)]
+    if not limited:
+        segs = [("Used", used, COLOR_MEM_USED), ("Cache", cache, COLOR_MEM_CACHE),
+                ("Free", free, COLOR_MEM_FREE)]
     bar = "".join(
         f'<div class="uf5-memseg" title="{label} {fmt_mb(v)}" '
         f'style="width:{v / shown_total * 100:.2f}%;background:{color}"></div>'
@@ -46,79 +58,72 @@ def render_memory_bar() -> None:
         for label, v, color in segs
     )
     st.markdown(f'<div class="uf5-legend">{legend}</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    if mem_source in ("quota", "override") and 0 < ceiling < total:
-        c1.metric("Quota", fmt_mb(ceiling),
-                 f"host has {fmt_gb(total * 1024)}", delta_color="off")
+    c1, c2, c3 = st.columns(3)
+    if limited:
+        c1.metric("Quota", fmt_mb(shown_total), f"host has {fmt_gb(total * 1024)}", delta_color="off")
     else:
         c1.metric("Total", fmt_mb(total), "capacity", delta_color="off")
-    c2.metric("Used", fmt_mb(used), f"{used / shown_total * 100:.1f}%")
-    c3.metric("Cache", fmt_mb(cache), f"{cache / shown_total * 100:.1f}%")
-    c4.metric("Free", fmt_mb(free), f"{free / shown_total * 100:.1f}%")
+    c2.metric("Our RAM", fmt_mb(our_rss_kb), f"{our_rss_kb / shown_total * 100:.1f}% of quota")
+    c3.metric("Host used", fmt_mb(host_used_kb if limited else used),
+              "other tenants share this host" if limited else "of host total")
 
 
-def render_cpu_panel(realtime: bool = True) -> None:
-    """CPU model, core counts, per-core bars (st.bar_chart) + used/free.
+def render_cpu_panel() -> None:
+    """CPU model, core counts, per-core bars + our-process figures.
 
     On a quota-limited container /proc/cpuinfo and /proc/stat describe the
     host, so the counts and the per-core rows are filtered down to the CPUs
     the scheduler will actually place us on, and the header says which source
-    the number came from (quota / affinity / host).
-
-    `realtime=False` is used inside the ticking fragment: the per-core bars
-    animate, but the process census is stable enough that re-rendering it
-    every 2s only causes flicker, so it is read and rendered once per call
-    without the animation churn.
+    the number came from (override / quota / affinity / host).
     """
     import streamlit as st
 
     model, host_physical, host_logical = cpu_info()
     ours, source = effective_cores()
-    core_txt, mem_txt = declared_vs_visible()
     st.markdown(f'<div class="uf5-big">{model}</div>', unsafe_allow_html=True)
     if source == "host":
         st.markdown(f'<span class="uf5-muted">{host_physical} physical · {host_logical} logical cores</span>',
                     unsafe_allow_html=True)
     elif source == "override":
         st.markdown(
-            f'<span class="uf5-muted">{ours} cores (declared) · host reports {host_logical} '
-            f'· STREAM_CPU_LIMIT</span>',
+            f'<span class="uf5-muted">our quota: {ours} core(s) · host has {host_logical} '
+            f'· declared via STREAM_CPU_LIMIT</span>',
             unsafe_allow_html=True)
     else:
         quota_txt = "cgroup quota" if source == "quota" else "sched affinity"
         st.markdown(
-            f'<span class="uf5-muted">{ours} cores for this container '
-            f'· {quota_txt} · host has {host_logical}</span>',
+            f'<span class="uf5-muted">our quota: {ours} core(s) · {quota_txt} · host has {host_logical}</span>',
             unsafe_allow_html=True)
-    snap1 = read_cpu_times()
-    total1, idle1 = read_cpu_total()
-    if realtime:
-        # Only the animated bar path needs a second sample; the lifetime
-        # figures below are order-independent and a 0.5s sleep on every tick
-        # would stall the fragment.
-        time.sleep(0.5)
-        snap2 = read_cpu_times()
-        total2, idle2 = read_cpu_total()
-    else:
-        snap2, total2, idle2 = snap1, total1, idle1
-
-    allowed = our_cpu_ids(sorted(snap1.keys(), key=lambda n: int("".join(c for c in n if c.isdigit()) or 0)))
+    # Per-core deltas come from the previous tick, kept in session_state.
+    # Sampling twice inside one call with a sleep would block the fragment
+    # for half a second on every tick, and sampling once per call is not a
+    # delta at all — the first implementation did that and every bar read 0.
+    snap_now = read_cpu_times()
+    total_now, idle_now = read_cpu_total()
+    prev = st.session_state.get("uf5_cpu_prev_sample")
+    st.session_state["uf5_cpu_prev_sample"] = {"cores": dict(snap_now), "total": (total_now, idle_now)}
+    st.session_state["uf5_cpu_prev"] = dict(snap_now)
     per_core: dict[str, float] = {}
-    for name in allowed:
-        t1, i1 = snap1.get(name, (0, 0))
-        t2, i2 = snap2.get(name, (0, 0))
-        dt, di = t2 - t1, i2 - i1
-        per_core[name] = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
-    if per_core:
-        host_avg = round(sum(per_core.values()) / len(per_core), 1)
-    else:
-        dt, di = total2 - total1, idle2 - idle1
-        host_avg = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
+    host_avg = 0.0
+    if prev:
+        old_cores = prev.get("cores") or {}
+        allowed = our_cpu_ids(sorted(snap_now.keys(), key=lambda n: int("".join(c for c in n if c.isdigit()) or 0)))
+        for name in allowed:
+            t1, i1 = old_cores.get(name, (0, 0))
+            t2, i2 = snap_now.get(name, (0, 0))
+            dt, di = t2 - t1, i2 - i1
+            per_core[name] = round(max(0.0, min((1 - di / dt) * 100, 100.0)), 1) if dt > 0 else 0.0
+        if per_core:
+            host_avg = round(sum(per_core.values()) / len(per_core), 1)
+        else:
+            ot, oi = prev.get("total", (0, 0))
+            dt, di = total_now - ot, idle_now - oi
+            host_avg = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
 
-    # Lifetime accounting, not a 0.5s delta: a process that started a moment
-    # ago rounds to ~0% over a sub-second window and then reads as idle, which
-    # is exactly the process an operator is looking for. /proc/uptime minus the
-    # process's own starttime gives every process a real average.
+    # Lifetime accounting, not a sub-second delta: a process that started a
+    # moment ago rounds to ~0% over a 0.5s window and then reads as idle,
+    # which is exactly the process an operator is looking for. /proc/uptime
+    # minus the process's own starttime gives every process a real average.
     census = procs.census()
     ours_rows = [p for p in census if p.is_ours]
     their_rows = [p for p in census if not p.is_ours]
@@ -128,30 +133,9 @@ def render_cpu_panel(realtime: bool = True) -> None:
     their_rss_mb = sum(p.rss_kb for p in their_rows) / 1024
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Our CPU", f"{our_core_pct}%", f"{their_core_pct}% of other pids", delta_color="off")
+    m1.metric("Our CPU", f"{our_core_pct}%", f"{their_core_pct}% other pids", delta_color="off")
     m2.metric("Our RAM", f"{our_rss_mb:.0f} MB", f"{their_rss_mb:.0f} MB other pids", delta_color="off")
     m3.metric("Host load", f"{host_avg:.1f}%", "includes other tenants", delta_color="off")
-
-    rows_html = ""
-    for group, accent, note in ((ours_rows, COLOR_ACCENT, "ours"), (their_rows, COLOR_BORDER, "other")):
-        if not group:
-            continue
-        for p in group:
-            rows_html += (
-                f'<tr><td style="padding:2px 10px 2px 0;color:{COLOR_MUTED}">{p.pid}</td>'
-                f'<td style="padding:2px 10px 2px 0">'
-                f'<span style="color:{accent}">●</span> {html.escape(p.comm)}'
-                f'<span style="color:{COLOR_MUTED}"> · {html.escape(p.role)}</span></td>'
-                f'<td style="padding:2px 10px 2px 0;text-align:right">{p.rss_kb / 1024:.0f} MB</td>'
-                f'<td style="padding:2px 0;text-align:right">{p.cpu_pct:.0f}%</td></tr>'
-            )
-    if rows_html:
-        st.markdown(
-            f'<div class="uf5-legend" style="margin-top:6px">'
-            f'<table style="border-collapse:collapse;font-size:12px">{rows_html}</table>'
-            f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
-            f'● ours (Go worker, tailscaled, Streamlit) · other pids in this container</div></div>',
-            unsafe_allow_html=True)
 
     if per_core:
         # Water-fill bars + drop ghost: when a bar decreases, the lost portion
@@ -194,6 +178,74 @@ def render_cpu_panel(realtime: bool = True) -> None:
                 unsafe_allow_html=True)
 
 
+ROLE_LABEL = {
+    "go worker": "Go sidecar · checks proxies, serves /v1",
+    "tailscaled": "Tailscale daemon · mesh transport",
+    "streamlit": "Streamlit server · UI and this panel",
+    "python": "Python · pool, snapshots, geo cache",
+    "runtime": "Runtime plumbing",
+    "other": "Other pid in this container",
+}
+
+
+def render_processes() -> None:
+    """Separate section: every pid in this container with what it is and what it burns.
+
+    /proc is namespaced inside a container, so every pid listed here is ours —
+    which is the only CPU/RAM figure that survives a host-mounted /proc. The
+    table is intentionally outside the ticking fragment: process identity
+    changes rarely, so re-rendering it every 2s only causes flicker.
+    """
+    import streamlit as st
+
+    try:
+        live = st.fragment(run_every=5)
+    except TypeError:
+        live = st.fragment
+
+    @live
+    def _table() -> None:
+        if st.session_state.get("uf5_section", "stats") != "stats":
+            return
+        census = procs.census()
+        if not census:
+            st.caption("no processes visible")
+            return
+        ours, _c, _p = effective_cores()
+        head = (
+            f'<tr><th style="text-align:left;padding:0 12px 4px 0;color:{COLOR_MUTED};'
+            f'font-weight:500">pid</th>'
+            f'<th style="text-align:left;padding:0 12px 4px 0;color:{COLOR_MUTED};font-weight:500">what it is</th>'
+            f'<th style="text-align:right;padding:0 12px 4px 0;color:{COLOR_MUTED};font-weight:500">RAM</th>'
+            f'<th style="text-align:right;padding:0 0 4px 0;color:{COLOR_MUTED};font-weight:500">CPU of 1 core</th></tr>'
+        )
+        body = ""
+        for p in census:
+            accent = COLOR_ACCENT if p.is_ours else COLOR_BORDER
+            role = ROLE_LABEL.get(p.role, p.role)
+            body += (
+                f'<tr><td style="padding:3px 12px 3px 0;color:{COLOR_MUTED}">{p.pid}</td>'
+                f'<td style="padding:3px 12px 3px 0">'
+                f'<span style="color:{accent}">●</span> {html.escape(p.comm)}'
+                f'<div style="color:{COLOR_MUTED};font-size:11px">{html.escape(role)}</div></td>'
+                f'<td style="padding:3px 12px 3px 0;text-align:right">{p.rss_kb / 1024:.0f} MB</td>'
+                f'<td style="padding:3px 0 3px 0;text-align:right">{p.cpu_pct:.1f}%</td></tr>'
+            )
+        total_mb = sum(p.rss_kb for p in census) / 1024
+        st.markdown(
+            f'<div class="uf5-card" style="padding:12px 14px">'
+            f'<table style="border-collapse:collapse;width:100%;font-size:12px">'
+            f'{head}{body}</table>'
+            f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:8px">'
+            f'● ours — Go worker, tailscaled, Streamlit, Python · quota is {ours} core(s)</div>'
+            f'<div style="color:{COLOR_MUTED};font-size:11px">'
+            f'{len(census)} pids · {total_mb:.0f} MB resident (shared pages counted per process)</div>'
+            f'</div>',
+            unsafe_allow_html=True)
+
+    _table()
+
+
 def render_canvas() -> None:
     """Memory / CPU canvases as native tabs (no switcher widget, no emoji).
 
@@ -214,7 +266,7 @@ def render_canvas() -> None:
     except TypeError:
         live = slow = st.fragment
 
-    tab_mem, tab_cpu, tab_disk = st.tabs(["Memory", "CPU", "Disk"])
+    tab_mem, tab_cpu, tab_proc, tab_disk = st.tabs(["Memory", "CPU", "Processes", "Disk"])
 
     def _on_stats() -> bool:
         # Stale auto-timers from a previous section must render nothing —
@@ -233,9 +285,12 @@ def render_canvas() -> None:
         @live
         def _live_cpu() -> None:
             if _on_stats():
-                render_cpu_panel(realtime=False)
+                render_cpu_panel()
 
         _live_cpu()
+
+    with tab_proc:
+        render_processes()
 
     with tab_disk:
         @slow
