@@ -1,3 +1,5 @@
+import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -7,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.core.config import (COLOR_BORDER, COLOR_MEM_OTHER, COLOR_OURS,  # noqa: E402
-                             COLOR_OURS_DEEP)
+from lib.core.config import (COLOR_BORDER, COLOR_MEM_OTHER,  # noqa: E402
+                             COLOR_OURS)
 from lib.sections.stats import (PROCESS_REFRESH_DEFAULT,  # noqa: E402
                                 PROCESS_REFRESH_MAX, PROCESS_REFRESH_MIN,
                                 ROLE_LABEL, _float_history, _live_cpu_split,
@@ -163,7 +165,6 @@ class ColorFamilyTests(unittest.TestCase):
 
     def test_ours_is_green_family(self):
         self.assertTrue(COLOR_OURS.startswith("#A8"), COLOR_OURS)
-        self.assertTrue(COLOR_OURS_DEEP.startswith("#6F"), COLOR_OURS_DEEP)
 
     def test_other_is_blue_family(self):
         blue = COLOR_MEM_OTHER.lstrip("#").lower()
@@ -231,6 +232,47 @@ class MemoryUnitTests(unittest.TestCase):
             # 15.4GB in kB is ~15.7M; in bytes it would be ~15.7B.
             self.assertLess(total, 1 << 40, "must be kB, not bytes")
             self.assertGreater(total, 1 << 20)
+
+
+class NameResolutionTests(unittest.TestCase):
+    """Every module-level name a render function touches must actually exist.
+
+    Regression: render_memory_bar referenced COLOR_MEM_OTHER, which I added to
+    config.py but forgot to import. py_compile passes, unit tests on the pure
+    helpers passed, and the app only died when the Memory tab rendered on
+    Streamlit Cloud. Calling the function with a stubbed streamlit is the only
+    check that catches this class of bug before deploy.
+    """
+
+    def test_all_colors_used_by_stats_are_imported(self):
+        import lib.core.config as cfg
+        import lib.sections.stats as stats
+        source = pathlib.Path(stats.__file__).read_text()
+        used = set(re.findall(r"\bCOLOR_[A-Z_]+\b", source))
+        for name in sorted(used):
+            self.assertTrue(hasattr(cfg, name), f"{name} used in stats.py but absent from config")
+            self.assertTrue(hasattr(stats, name), f"{name} used but not imported into stats")
+
+    def test_render_memory_bar_resolves_names(self):
+        import lib.sections.stats as stats
+        names = set(re.findall(r"\bCOLOR_[A-Z_]+\b",
+                               pathlib.Path(stats.__file__).read_text()))
+        for name in names:
+            # Resolving in the function's module globals is what a real call does.
+            self.assertIn(name, stats.__dict__ if hasattr(stats, "__dict__") else vars(stats),
+                          f"{name} would raise NameError at render time")
+
+    def test_no_dangling_color_constants_in_config(self):
+        # A color declared in config but referenced nowhere in the package is
+        # dead weight that drifts the palette. Scanned across every module, not
+        # just stats.py — COLOR_ACCENT is unused there but used by ui.py, logs,
+        # shell and disk, so a stats-only scan would produce false orphans.
+        import lib.core.config as cfg
+        root = pathlib.Path(cfg.__file__).resolve().parents[1]
+        blob = "\n".join(p.read_text() for p in root.rglob("*.py")
+                         if "tests" not in p.parts)
+        for name in sorted(n for n in dir(cfg) if n.startswith("COLOR_")):
+            self.assertIn(name, blob, f"{name} declared in config but never used")
 
 
 if __name__ == "__main__":

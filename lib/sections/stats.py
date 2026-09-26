@@ -6,7 +6,8 @@ import re
 import time
 from typing import Any
 from lib.core.config import (COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MEM_FREE,
-                             COLOR_MEM_USED, COLOR_MUTED, COLOR_OURS, COLOR_TEXT)
+                             COLOR_MEM_OTHER, COLOR_MUTED, COLOR_OURS,
+                             COLOR_TEXT)
 from lib.core.ui import badge
 from lib.services import procs
 from lib.services.disk import render_disk_panel

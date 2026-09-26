@@ -31,10 +31,7 @@ COLOR_ERR = "#C26D6D"
 #   blue   = everything else on the shared host (other tenants, page cache)
 # The accent blue marks UI chrome, never data ownership.
 COLOR_OURS = "#A8C98A"        # pale green — our own processes
-COLOR_OURS_DEEP = "#6FA85C"   # deeper green — our hot segments / ghost
 COLOR_MEM_OTHER = "#4A7FA5"   # steel blue — other tenants / used by others
-
-COLOR_MEM_USED = "#4A7FA5"  # steel blue — application memory (legacy alias)
 
 COLOR_MEM_CACHE = "#A8C3D1"  # pale steel — page cache / reclaimable
 
