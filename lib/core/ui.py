@@ -4,7 +4,8 @@ import os
 import re
 from lib.core.config import (COLOR_ACCENT, COLOR_ACCENT_PALE, COLOR_ACCENT_SOFT,
                              COLOR_BG, COLOR_BORDER, COLOR_MEM_CACHE,
-                             COLOR_MUTED, COLOR_PANEL, COLOR_TEXT, ICON_SVGS)
+                             COLOR_MUTED, COLOR_OURS, COLOR_PANEL, COLOR_TEXT,
+                             ICON_SVGS)
 
 
 
@@ -116,6 +117,12 @@ def inject_style() -> None:
                     width: 100%; }}
         .uf5-col {{ flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
                     align-items: center; }}
+        /* Our share of a host bar, drawn as a green floor under the host's blue.
+           Used when the platform does not narrow our affinity mask, so no
+           per-core row is provably ours but our total load is still measurable. */
+        .uf5-ours {{ position: absolute; bottom: 0; left: 0; right: 0;
+                     background: {COLOR_OURS}; border-radius: 8px 8px 0 0;
+                     transition: height .9s cubic-bezier(.22,.8,.3,1); }}
         /* The empty part of a bar is the host's idle capacity, so it reads as
            pale blue rather than a neutral gray — gray is reserved for the
            drop ghost. */

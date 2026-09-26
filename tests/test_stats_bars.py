@@ -316,10 +316,40 @@ class AffinitySplitTests(unittest.TestCase):
         self.assertFalse(_affinity_narrows("host", ours=16, visible=16))
 
     def test_no_green_bars_when_mask_is_whole_host(self):
+        # Without the underlay the chart had zero green anywhere, so the
+        # operator could not see their own 1.3% at all.
         bars = render_core_bars({"cpu0": 80.0, "cpu1": 82.0}, {}, limit=0)
         self.assertEqual(len(bars), 2)
         for bar in bars:
             self.assertNotIn(COLOR_OURS, bar, "no row may be ours without proof")
+
+    def test_our_share_renders_green_underlay_on_every_bar(self):
+        # Cloud case: mask is the whole host, but our total load is measurable.
+        our_share = 1.3 / 100.0 * 16
+        bars = render_core_bars({f"cpu{i}": 78.0 for i in range(16)}, {},
+                                limit=0, our_share_pct=our_share)
+        for bar in bars:
+            self.assertIn("uf5-ours", bar, "our load must be visible on every bar")
+            self.assertIn("height:0.2%", bar)
+            self.assertIn(COLOR_MEM_OTHER, bar, "the host's load stays blue above it")
+
+    def test_underlay_never_exceeds_the_bar(self):
+        # our_share larger than a nearly-idle bar must be capped by the bar.
+        bars = render_core_bars({"cpu0": 3.0}, {}, limit=0, our_share_pct=90.0)
+        self.assertIn("height:3.0%", bars[0])
+        self.assertNotIn("height:90.0%", bars[0])
+
+    def test_underlay_hidden_when_share_is_negligible(self):
+        bars = render_core_bars({"cpu0": 80.0}, {}, limit=0, our_share_pct=0.0)
+        self.assertNotIn("uf5-ours", bars[0])
+
+    def test_underlay_absent_on_our_own_cores(self):
+        # When the mask is narrowed the bar is already fully green, so an
+        # underlay would double-count.
+        bars = render_core_bars({"cpu0": 40.0, "cpu1": 40.0}, {}, limit=2,
+                                our_share_pct=25.0)
+        self.assertNotIn("uf5-ours", bars[0])
+        self.assertIn(COLOR_OURS, bars[0])
 
     def test_green_only_first_rows_when_mask_narrows(self):
         bars = render_core_bars({"cpu0": 5.0, "cpu1": 5.0, "cpu2": 5.0}, {}, limit=2)
