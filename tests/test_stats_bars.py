@@ -56,12 +56,16 @@ class CoreBarsTests(unittest.TestCase):
         self.assertIn("height:10.0%", bars[0])
         self.assertIn("height:20.0%", bars[1])
 
-    def test_ours_green_host_pale(self):
+    def test_ours_green_host_blue(self):
+        # Green is only ever ours; every other core is the host's, in blue.
+        # Regression: non-ours cores were painted COLOR_BORDER (pale gray),
+        # which is indistinguishable from the empty part of a bar.
         bars = render_core_bars({"cpu0": 5.0, "cpu1": 5.0, "cpu2": 5.0}, {}, limit=2)
         self.assertIn(COLOR_OURS, bars[0])
         self.assertIn(COLOR_OURS, bars[1])
         self.assertNotIn(COLOR_OURS, bars[2])
-        self.assertIn(COLOR_BORDER, bars[2])
+        self.assertIn(COLOR_MEM_OTHER, bars[2])
+        self.assertNotIn(COLOR_BORDER, bars[2])
 
     def test_ghost_only_when_value_dropped(self):
         rising = render_core_bars({"cpu0": 50.0}, {"cpu0": 10.0}, limit=1)
@@ -261,6 +265,18 @@ class NameResolutionTests(unittest.TestCase):
         for name in sorted(used):
             self.assertTrue(hasattr(cfg, name), f"{name} used in stats.py but absent from config")
             self.assertTrue(hasattr(stats, name), f"{name} used but not imported into stats")
+
+    def test_all_colors_used_by_ui_are_imported(self):
+        # Same trap, different module: ui.py interpolates colors into the CSS
+        # block, so a missing import is a NameError on the first render.
+        import lib.core.config as cfg
+        import lib.core.ui as ui
+        source = pathlib.Path(ui.__file__).read_text()
+        used = set(re.findall(r"\bCOLOR_[A-Z_]+\b", source))
+        self.assertTrue(used, "ui.py must reference some colors")
+        for name in sorted(used):
+            self.assertTrue(hasattr(cfg, name), f"{name} used in ui.py but absent from config")
+            self.assertTrue(hasattr(ui, name), f"{name} used in ui.py but not imported")
 
     def test_render_memory_bar_resolves_names(self):
         import lib.sections.stats as stats

@@ -2,7 +2,9 @@
 from __future__ import annotations
 import os
 import re
-from lib.core.config import COLOR_ACCENT, COLOR_ACCENT_PALE, COLOR_ACCENT_SOFT, COLOR_BG, COLOR_BORDER, COLOR_MUTED, COLOR_PANEL, COLOR_TEXT, ICON_SVGS
+from lib.core.config import (COLOR_ACCENT, COLOR_ACCENT_PALE, COLOR_ACCENT_SOFT,
+                             COLOR_BG, COLOR_BORDER, COLOR_MEM_CACHE,
+                             COLOR_MUTED, COLOR_PANEL, COLOR_TEXT, ICON_SVGS)
 
 
 
@@ -114,8 +116,11 @@ def inject_style() -> None:
                     width: 100%; }}
         .uf5-col {{ flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
                     align-items: center; }}
+        /* The empty part of a bar is the host's idle capacity, so it reads as
+           pale blue rather than a neutral gray — gray is reserved for the
+           drop ghost. */
         .uf5-track {{ width: 100%; max-width: 100%; height: clamp(90px, 22vh, 220px);
-                      background: {COLOR_ACCENT_PALE}; border-radius: 8px;
+                      background: {COLOR_MEM_CACHE}; border-radius: 8px;
                       position: relative; overflow: hidden; }}
         .uf5-fill {{ position: absolute; bottom: 0; left: 0; right: 0;
                      background: linear-gradient(to top, {COLOR_ACCENT}, {COLOR_ACCENT_SOFT});
@@ -128,9 +133,11 @@ def inject_style() -> None:
         .uf5-val {{ font-size: clamp(8px, .8vw, 11px); font-weight: 700; color: {COLOR_TEXT};
                     margin-bottom: 2px; }}
         @keyframes uf5fill {{ from {{ transform: scaleY(0); }} to {{ transform: scaleY(1); }} }}
-        /* Drop ghost: gray zone marking how much a bar fell, decrease-only. */
+        /* Drop ghost: the portion a bar fell since the last tick. It is the one
+           place gray belongs on a bar — a neutral marker of a decrease, not a
+           data category. Data is green (ours) or blue (the host's). */
         .uf5-ghost {{ position: absolute; left: 0; right: 0;
-                     background: #B9C4CC; opacity: .8; border-radius: 8px 8px 0 0;
+                     background: {COLOR_BORDER}; opacity: .85; border-radius: 8px 8px 0 0;
                      transition: bottom .9s cubic-bezier(.22,.8,.3,1),
                                  height .9s cubic-bezier(.22,.8,.3,1),
                                  opacity 1.6s ease; }}

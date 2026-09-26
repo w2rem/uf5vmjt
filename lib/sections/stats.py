@@ -126,10 +126,16 @@ def _float_history(raw: Any) -> dict[str, float]:
 
 
 def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: int) -> list[str]:
-    """Per-core water-fill bars with a drop ghost, ours in accent, host's pale.
+    """Per-core water-fill bars.
 
-    A bar that fell since the last tick keeps the lost portion in gray until
-    the next tick melts it away, which reads as motion instead of a jump.
+    Colour is the whole point of this chart, so the families are exact:
+      green  — cores proven to be ours (affinity mask narrowed below the host)
+      blue   — every other core: other tenants' work
+      gray   — the drop ghost, the portion a bar fell since the last tick
+
+    A bar that fell keeps the lost portion in gray until the next tick melts
+    it away, which reads as motion instead of a jump. The ghost is the only
+    place gray belongs on a bar.
     """
     bars: list[str] = []
     for i, (name, value) in enumerate(per_core.items()):
@@ -139,7 +145,7 @@ def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: 
         drop = max(min(float(before), 100.0) - pct, 0.0) if isinstance(before, (int, float)) else 0.0
         has_ghost = drop >= 0.5
         ours_core = i < limit
-        fill = COLOR_OURS if ours_core else COLOR_BORDER
+        fill = COLOR_OURS if ours_core else COLOR_MEM_OTHER
         value_color = COLOR_TEXT if ours_core else COLOR_MUTED
         # Flush joint: flat top hugged by the ghost, no seam.
         fill_radius = "0 0 8px 8px" if has_ghost else "8px"
