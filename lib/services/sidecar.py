@@ -1,4 +1,11 @@
-"""uf5vmjt.lib.services.sidecar — Go worker sidecar lifecycle + pg/vlk verdicts."""
+"""uf5vmjt.lib.services.sidecar — Go worker sidecar lifecycle + verdicts.
+
+The Valkey verdict reader was removed with the Valkey cut: /v1/vlk no longer
+exists on the Go side, so it could only ever report a 404 and suggest a
+redeploy that would not help. The Postgres verdict reader stays for the
+diagnostic note it writes, but the Go warm-ping loop behind it is compiled
+out — Postgres is snapshot-only on this worker.
+"""
 from __future__ import annotations
 import json
 import os
@@ -236,51 +243,12 @@ def worker_pg_verdict() -> dict:
     return {}
 
 
-def worker_vlk_verdict() -> dict:
-    """Cached /v1/vlk verdict from the local sidecar. Empty when unreachable.
-
-    Mirrors worker_pg_verdict: the failure reason lands in uf5_vlk_note
-    (shown under the versions row), so 'unknown' is always diagnosable.
-    """
-    import streamlit as st
-
-    cached = st.session_state.get("uf5_vlk_verdict")
-    if isinstance(cached, dict) and cached:
-        return cached
-    url = f"http://127.0.0.1:{WORKER_PORT}/v1/vlk"
-    try:
-        data = fetch_json(url, timeout=3)
-    except urllib.error.HTTPError as e:
-        detail = f"sidecar http {e.code}"
-        try:
-            body = json.loads(e.read().decode(errors="replace") or "{}")
-            if isinstance(body, dict) and body.get("error"):
-                detail += f": {body['error']}"
-        except (ValueError, OSError):
-            pass
-        if e.code == 404:
-            detail += " (old worker — redeploy for /v1/vlk)"
-        if not _in_worker_grace():
-            st.session_state["uf5_vlk_note"] = detail
-        return {}
-    except Exception:  # noqa: BLE001
-        if not _in_worker_grace():
-            st.session_state["uf5_vlk_note"] = f"sidecar unreachable on :{WORKER_PORT}"
-        return {}
-    if isinstance(data, dict) and data.get("version"):
-        st.session_state["uf5_vlk_verdict"] = data
-        st.session_state.pop("uf5_vlk_note", None)
-        return data
-    st.session_state["uf5_vlk_note"] = "empty verdict"
-    return {}
-
-
 def worker_singbox_status() -> dict:
     """Cached /v1/singbox status from the local sidecar. Empty when unreachable.
 
-    Mirrors worker_vlk_verdict: the failure reason lands in uf5_singbox_note
-    (shown under the versions row), so 'unknown' is always diagnosable.
-    Success is an `installed` version ("" while still downloading).
+    The reason lands in uf5_singbox_note (shown under the versions row), so
+    'unknown' is always diagnosable. Success is an `installed` version ("" while
+    still downloading).
     """
     import streamlit as st
 

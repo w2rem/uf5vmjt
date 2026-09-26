@@ -9,7 +9,6 @@ import subprocess
 from lib.core.config import BIN_TAILSCALE, COLOR_MUTED, COLOR_OK, SB_BIN_DIR
 from lib.core.events import log_event
 from lib.core.ui import badge, load_icon
-from lib.services.sidecar import worker_pg_verdict, worker_vlk_verdict
 from lib.services.sidecar import worker_singbox_status
 from lib.services.tailscale import worker_ts_status
 
@@ -17,16 +16,6 @@ from lib.services.tailscale import worker_ts_status
 
 def resolve_python_version() -> str:
     return platform.python_version()
-
-
-def resolve_postgres_version() -> str:
-    """Postgres server version via the sidecar pinger. Never raises."""
-    return str(worker_pg_verdict().get("version", "") or "unknown")
-
-
-def resolve_valkey_version() -> str:
-    """Valkey server version via the sidecar pinger. Never raises."""
-    return str(worker_vlk_verdict().get("version", "") or "unknown")
 
 
 def resolve_tailscale_version() -> str:
@@ -92,17 +81,23 @@ def resolve_singbox_version() -> str:
 
 
 def render_versions() -> None:
-    """Python / Postgres / Valkey / Tailscale / sing-box row: icon + name + version."""
+    """Python / Tailscale / sing-box row: icon + name + version.
+
+    Postgres and Valkey badges were removed: neither has a live role in this
+    worker. Postgres is snapshot-only (LAYERBASE_DATABASE_URL, Python side,
+    30-minute cycle) and its Go warm-ping loop is compiled out, so /v1/pg can
+    only ever answer "no PG_DATABASE_URL". Valkey was cut entirely — the Go
+    package, its /v1/vlk endpoint and /v1/logs are gone, so a badge could only
+    report 404 and blame a redeploy that would not help.
+    """
     import streamlit as st
 
     items = (
         ("Python", "python", resolve_python_version),
-        ("Postgres", "postgres", resolve_postgres_version),
-        ("Valkey", "valkey", resolve_valkey_version),
         ("Tailscale", "tailscale", resolve_tailscale_version),
         ("sing-box", "sagernet", resolve_singbox_version),
     )
-    # Five badges share one row: shrink icons + type so nothing wraps.
+    # Badges share one row: shrink icons + type so nothing wraps.
     compact = len(items) > 4
     row_cls = "uf5-ver uf5-ver-compact" if compact else "uf5-ver"
     icon_px = 32 if compact else 44
@@ -128,12 +123,6 @@ def render_versions() -> None:
             f'{badge(version, color)}</div>',
             unsafe_allow_html=True)
         log_event("debug", f"version {label}={version}")
-    note = st.session_state.get("uf5_pg_note")
-    if note:
-        st.caption(f"postgres source: {note}")
-    vlk_note = st.session_state.get("uf5_vlk_note")
-    if vlk_note:
-        st.caption(f"valkey source: {vlk_note}")
     sb_note = st.session_state.get("uf5_singbox_note")
     if sb_note:
         st.caption(f"sing-box source: {sb_note}")
