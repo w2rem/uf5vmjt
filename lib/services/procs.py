@@ -12,6 +12,7 @@ what we are allowed to use.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 CLOCK_TICKS = 100
@@ -21,7 +22,64 @@ CLOCK_TICKS = 100
 _AFTER_COMM_UTIME = 11
 _AFTER_COMM_STIME = 12
 _AFTER_COMM_RSS = 21
+# starttime is field 22 (1-based) in proc(5), i.e. index 19 after comm.
+_AFTER_COMM_START = 19
 _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def read_cmdline(pid: int) -> str:
+    """Full command name from /proc/<pid>/cmdline.
+
+    /proc/<pid>/comm is capped at 15 bytes by the kernel, which is why a
+    worker shows up as "w" and a Streamlit runner as "run-streamlit.s". The
+    first cmdline argument carries the real name, so it is preferred.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    if not raw:
+        return ""
+    first = raw.split(b"\0", 1)[0]
+    return first.decode("utf-8", "replace").rsplit("/", 1)[-1][:32]
+
+
+def read_statm_rss_kb(pid: int) -> int:
+    """Resident pages from /proc/<pid>/statm, in kB. Matches `ps` RSS."""
+    try:
+        parts = Path(f"/proc/{pid}/statm").read_text().split()
+    except (OSError, ValueError):
+        return 0
+    if len(parts) < 2:
+        return 0
+    try:
+        return int(parts[1]) * 4
+    except ValueError:
+        return 0
+
+
+def boot_jiffies() -> int:
+    """System uptime in jiffies, from /proc/uptime."""
+    try:
+        raw = Path("/proc/uptime").read_text().split()
+        return int(float(raw[0]) * _clock_ticks())
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def lifetime_percent(utime: int, stime: int, start_jiffies: int, now_jiffies: int) -> float:
+    """Lifetime CPU of one process as a percent of one core.
+
+    The window is uptime minus the process's own start time, so a short-lived
+    process reports its true average instead of vanishing: a delta over a
+    sub-second window rounds to zero for anything that just started, which is
+    exactly the process an operator is looking for.
+    """
+    hz = _clock_ticks()
+    window = (now_jiffies - start_jiffies) / hz
+    if window <= 0 or hz <= 0:
+        return 0.0
+    return round(((utime + stime) / hz) / window * 100.0, 1)
 
 
 def _clock_ticks() -> int:
@@ -143,3 +201,87 @@ def total_rss_bytes(pids: list[int] | None = None) -> int:
     for pid in (pids if pids is not None else our_pids()):
         total += rss_bytes(pid)
     return total
+
+
+# Names that identify the components this worker runs. The Go binary reports
+# comm "w" (15-byte cap), so the Go sidecar is matched on the binary name.
+KNOWN_ROLES = ("worker", "tailscaled", "streamlit", "python", "supervisord",
+               "run-streamlit", "entrypoint", "sh")
+
+
+@dataclass
+class ProcInfo:
+    """One visible process, with everything the panel renders about it."""
+
+    pid: int
+    comm: str
+    rss_kb: int
+    cpu_pct: float
+    role: str
+    is_ours: bool
+
+
+def _classify(name: str) -> tuple[str, bool]:
+    low = name.lower()
+    if low == "worker":
+        return "go worker", True
+    if low == "tailscaled":
+        return "tailscaled", True
+    if low == "streamlit" or low.startswith("run-streamlit"):
+        return "streamlit", True
+    if low.startswith("python"):
+        return "python", True
+    if low in {"supervisord", "entrypoint", "sh", "sleep", "bash"}:
+        return "runtime", True
+    return "other", False
+
+
+def census() -> list[ProcInfo]:
+    """Every visible process with CPU, RSS and a role classification.
+
+    Every pid in here is inside our container, so `is_ours` marks the ones
+    that are actually part of the worker stack (Go sidecar, tailscaled,
+    Streamlit) rather than shell plumbing and transients.
+    """
+    now = boot_jiffies()
+    out: list[ProcInfo] = []
+    for pid in our_pids():
+        fields = read_stat_fields(pid)
+        if fields is None:
+            continue
+        _comm15, utime, stime, _rss_pages = fields
+        name = read_cmdline(pid) or fields[0]
+        role, ours = _classify(name)
+        start = read_start_jiffies(pid)
+        out.append(ProcInfo(
+            pid=pid,
+            comm=name,
+            rss_kb=read_statm_rss_kb(pid),
+            cpu_pct=lifetime_percent(utime, stime, start, now),
+            role=role,
+            is_ours=ours,
+        ))
+    out.sort(key=lambda p: (not p.is_ours, -p.cpu_pct, -p.rss_kb))
+    return out
+
+
+def read_start_jiffies(pid: int) -> int:
+    """Absolute start time of a process, in jiffies since boot."""
+    fields = _raw_fields(pid)
+    if fields is None:
+        return 0
+    try:
+        return int(fields[_AFTER_COMM_START])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _raw_fields(pid: int) -> list[str] | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    close = raw.rfind(")")
+    if close < 0:
+        return None
+    return raw[close + 2:].split()
