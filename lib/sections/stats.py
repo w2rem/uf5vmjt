@@ -1,11 +1,13 @@
 """uf5vmjt.lib.sections.stats — stats section."""
 from __future__ import annotations
+import html
 import re
 import time
-from lib.core.config import COLOR_MEM_CACHE, COLOR_MEM_FREE, COLOR_MEM_USED
+from lib.core.config import COLOR_MEM_CACHE, COLOR_MEM_FREE, COLOR_MEM_USED, COLOR_MUTED
 from lib.core.ui import badge
+from lib.services import procs
 from lib.services.disk import render_disk_panel
-from lib.services.limits import effective_cores, effective_memory_bytes, our_cpu_ids
+from lib.services.limits import declared_vs_visible, effective_cores, effective_memory_bytes, our_cpu_ids
 from lib.services.netinfo import flag_url, get_cluster, get_geo, shard_color
 from lib.services.sysinfo import cpu_info, fmt_gb, fmt_mb, memory_segments, read_cpu_times, read_cpu_total, read_meminfo
 from lib.services.versions import render_versions
@@ -44,8 +46,9 @@ def render_memory_bar() -> None:
     )
     st.markdown(f'<div class="uf5-legend">{legend}</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
-    if mem_source == "quota" and 0 < ceiling < total:
-        c1.metric("Quota", fmt_mb(ceiling), f"host has {fmt_gb(total * 1024)}", delta_color="off")
+    if mem_source in ("quota", "override") and 0 < ceiling < total:
+        c1.metric("Quota", fmt_mb(ceiling),
+                 f"host has {fmt_gb(total * 1024)}", delta_color="off")
     else:
         c1.metric("Total", fmt_mb(total), "capacity", delta_color="off")
     c2.metric("Used", fmt_mb(used), f"{used / shown_total * 100:.1f}%")
@@ -65,10 +68,16 @@ def render_cpu_panel() -> None:
 
     model, host_physical, host_logical = cpu_info()
     ours, source = effective_cores()
+    core_txt, mem_txt = declared_vs_visible()
     st.markdown(f'<div class="uf5-big">{model}</div>', unsafe_allow_html=True)
     if source == "host":
         st.markdown(f'<span class="uf5-muted">{host_physical} physical · {host_logical} logical cores</span>',
                     unsafe_allow_html=True)
+    elif source == "override":
+        st.markdown(
+            f'<span class="uf5-muted">{ours} cores (declared) · host reports {host_logical} '
+            f'· STREAM_CPU_LIMIT</span>',
+            unsafe_allow_html=True)
     else:
         quota_txt = "cgroup quota" if source == "quota" else "sched affinity"
         st.markdown(
@@ -77,9 +86,12 @@ def render_cpu_panel() -> None:
             unsafe_allow_html=True)
     snap1 = read_cpu_times()
     total1, idle1 = read_cpu_total()
+    our_before = procs.sample()
     time.sleep(0.5)
     snap2 = read_cpu_times()
     total2, idle2 = read_cpu_total()
+    our_after = procs.sample()
+    window = 0.5
 
     allowed = our_cpu_ids(sorted(snap1.keys(), key=lambda n: int("".join(c for c in n if c.isdigit()) or 0)))
     per_core: dict[str, float] = {}
@@ -88,26 +100,36 @@ def render_cpu_panel() -> None:
         t2, i2 = snap2.get(name, (0, 0))
         dt, di = t2 - t1, i2 - i1
         per_core[name] = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
-    # Average over our cores only: the aggregate "cpu" line spans the whole
-    # host, so on a quota-limited box it would report a neighbour's idle.
+    # Our own processes are the only CPU figure that is truthful on a
+    # quota-limited container: /proc/<pid>/stat is namespaced, so every pid is
+    # ours, while /proc/stat rows and the aggregate "cpu" line span the host.
+    our_pct = procs.delta_percent(our_before, our_after, cores=ours, window_s=window)
     if per_core:
-        avg = round(sum(per_core.values()) / len(per_core), 1)
+        host_avg = round(sum(per_core.values()) / len(per_core), 1)
     else:
         dt, di = total2 - total1, idle2 - idle1
-        avg = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
+        host_avg = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
+    avg = our_pct
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Average load", f"{avg}%")
-    busy = sum(1 for v in per_core.values() if v >= 5)
-    prev_busy = st.session_state.get("uf5_busy_prev")
-    if prev_busy is None or not isinstance(prev_busy, int):
-        busy_delta = None  # first tick: no history yet
-    else:
-        diff = busy - prev_busy
-        busy_delta = f"{diff:+d}" if diff else "0"
-    st.session_state["uf5_busy_prev"] = busy
-    m2.metric("Busy cores", busy, busy_delta, delta_color="normal")
-    m3.metric("Free (avg)", f"{100 - avg:.1f}%")
+    m1.metric("Our CPU", f"{our_pct}%", f"{host_avg}% host", delta_color="off")
+    top = procs.top_cpu(our_before, our_after, window, limit=6)
+    m2.metric("Our processes", len(our_after), f"{len(procs.our_pids())} pids total", delta_color="off")
+    m3.metric("Free", f"{max(0.0, 100 - our_pct):.1f}%", "of our quota")
+
+    if top:
+        rows = "".join(
+            f'<tr><td style="padding:2px 10px 2px 0;color:{COLOR_MUTED}">{pid}</td>'
+            f'<td style="padding:2px 10px 2px 0">{html.escape(comm)}</td>'
+            f'<td style="padding:2px 0;text-align:right">{pct:.0f}%</td></tr>'
+            for pid, comm, pct in top
+        )
+        st.markdown(
+            f'<div class="uf5-legend" style="margin-top:6px">'
+            f'<table style="border-collapse:collapse;font-size:12px">{rows}</table></div>',
+            unsafe_allow_html=True)
+    st.caption("Our processes = pids in this container (namespaced /proc). "
+               "Host load includes other tenants.")
 
     if per_core:
         # Water-fill bars + drop ghost: when a bar decreases, the lost portion

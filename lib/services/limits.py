@@ -150,10 +150,19 @@ def our_cpu_ids(host_ids: list[str]) -> list[str]:
 def effective_cores() -> tuple[int, int | None]:
     """Return (cores_visible_to_us, source).
 
-    Preference order: cgroup quota (the real limit), then the affinity mask
-    (what the scheduler will actually place us on), then os.cpu_count().
-    The source string is for display: "quota" / "affinity" / "host".
+    Preference order: an explicit override, then the cgroup quota (the real
+    limit), then the affinity mask (what the scheduler will actually place us
+    on), then os.cpu_count(). The source string is for display: "override" /
+    "quota" / "affinity" / "host".
+
+    The override exists because some managed platforms hide /sys/fs/cgroup
+    from the container entirely. There is no in-container way to detect the
+    quota then, and silently reporting the host's 16 cores is worse than an
+    explicit declaration — hence STREAM_CPU_LIMIT / STREAM_MEM_LIMIT_MB.
     """
+    override = _env_int("STREAM_CPU_LIMIT")
+    if override is not None and override > 0:
+        return override, "override"
     quota = cgroup_cpu_quota()
     if quota is not None and quota >= _MIN_MHZ:
         # 1.5 cores is 2 schedulable CPUs at 75% — round up so a fractional
@@ -166,8 +175,51 @@ def effective_cores() -> tuple[int, int | None]:
 
 
 def effective_memory_bytes() -> tuple[int, str]:
-    """Return (memory_bytes, source) with source in quota/host."""
+    """Return (memory_bytes, source) with source in override/quota/host."""
+    override_mb = _env_int("STREAM_MEM_LIMIT_MB")
+    if override_mb is not None and override_mb > 0:
+        return override_mb * 1024 * 1024, "override"
     limit = cgroup_memory_bytes()
     if limit is not None and limit > 0:
         return limit, "quota"
     return 0, "host"
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def declared_vs_visible() -> tuple[str, str]:
+    """Compare our declared limits against what the host reports.
+
+    Returns two short strings: (cores, memory). A mismatch is the signal that
+    the platform does not expose the container's cgroup — the header then says
+    "2/16" rather than pretending the host number is the container's.
+    """
+    cores, source = effective_cores()
+    mem_bytes, mem_source = effective_memory_bytes()
+    try:
+        from .sysinfo import cpu_info, read_meminfo
+        host_logical = cpu_info()[2]
+        host_mem_kb = read_meminfo().get("MemTotal", 0)
+    except Exception:
+        host_logical, host_mem_kb = 0, 0
+    if source == "host" or not host_logical or cores == host_logical:
+        core_txt = str(cores)
+    else:
+        core_txt = f"{cores}/{host_logical}"
+    if mem_bytes and host_mem_kb:
+        mem_gb = mem_bytes / (1024 ** 3)
+        host_gb = host_mem_kb / (1024 ** 2)
+        mem_txt = f"{mem_gb:.1f}/{host_gb:.1f}" if abs(host_gb - mem_gb) > 0.2 else f"{mem_gb:.1f}"
+    elif mem_bytes:
+        mem_txt = f"{mem_bytes / (1024 ** 3):.1f}"
+    else:
+        mem_txt = "?"
+    return core_txt, mem_txt
