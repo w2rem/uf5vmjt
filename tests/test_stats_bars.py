@@ -323,33 +323,33 @@ class AffinitySplitTests(unittest.TestCase):
         for bar in bars:
             self.assertNotIn(COLOR_OURS, bar, "no row may be ours without proof")
 
-    def test_our_share_renders_green_underlay_on_every_bar(self):
-        # Cloud case: mask is the whole host, but our total load is measurable.
-        our_share = 1.3 / 100.0 * 16
-        bars = render_core_bars({f"cpu{i}": 78.0 for i in range(16)}, {},
-                                limit=0, our_share_pct=our_share)
+    def test_our_load_is_not_smeared_across_bars(self):
+        # Regression: our 0.3% was spread over 16 bars = 0.05% each, a tenth
+        # of a pixel, invisible while adding noise to every host bar. It is
+        # shown on the "who is using the host" bar instead.
+        bars = render_core_bars({f"cpu{i}": 40.0 for i in range(16)}, {}, limit=0)
         for bar in bars:
-            self.assertIn("uf5-ours", bar, "our load must be visible on every bar")
-            self.assertIn("height:0.2%", bar)
-            self.assertIn(COLOR_MEM_OTHER, bar, "the host's load stays blue above it")
+            self.assertNotIn("uf5-ours", bar)
+            self.assertIn(COLOR_MEM_OTHER, bar)
 
-    def test_underlay_never_exceeds_the_bar(self):
-        # our_share larger than a nearly-idle bar must be capped by the bar.
-        bars = render_core_bars({"cpu0": 3.0}, {}, limit=0, our_share_pct=90.0)
-        self.assertIn("height:3.0%", bars[0])
-        self.assertNotIn("height:90.0%", bars[0])
+    def test_tiny_nonzero_share_gets_a_visible_floor(self):
+        # 0.3% of a 22px bar is 0.07px. Any non-zero share gets a floor so
+        # "we are using CPU" is legible; the label keeps the true number.
+        html = render_split_load_bar(0.3, 0.0, 99.7)
+        width = float(re.search(r'width:([\d.]+)%', html).group(1))
+        self.assertGreaterEqual(width, 1.0, "a real load must be visible")
+        self.assertIn("0.3%", html, "the label must show the true value")
 
-    def test_underlay_hidden_when_share_is_negligible(self):
-        bars = render_core_bars({"cpu0": 80.0}, {}, limit=0, our_share_pct=0.0)
-        self.assertNotIn("uf5-ours", bars[0])
+    def test_true_zero_stays_zero(self):
+        # Regression: the visibility floor claimed 1.5% of load that did not
+        # exist. Zero must render as nothing.
+        html = render_split_load_bar(0.0, 0.0, 100.0)
+        self.assertIn("width:0.0%", html)
 
-    def test_underlay_absent_on_our_own_cores(self):
-        # When the mask is narrowed the bar is already fully green, so an
-        # underlay would double-count.
-        bars = render_core_bars({"cpu0": 40.0, "cpu1": 40.0}, {}, limit=2,
-                                our_share_pct=25.0)
-        self.assertNotIn("uf5-ours", bars[0])
-        self.assertIn(COLOR_OURS, bars[0])
+    def test_large_share_is_not_inflated(self):
+        html = render_split_load_bar(50.0, 0.0, 50.0)
+        width = float(re.search(r'width:([\d.]+)%', html).group(1))
+        self.assertAlmostEqual(width, 50.0, places=1)
 
     def test_green_only_first_rows_when_mask_narrows(self):
         bars = render_core_bars({"cpu0": 5.0, "cpu1": 5.0, "cpu2": 5.0}, {}, limit=2)

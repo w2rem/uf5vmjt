@@ -32,6 +32,10 @@ COLOR_ERR = "#C26D6D"
 # The accent blue marks UI chrome, never data ownership.
 COLOR_OURS = "#A8C98A"        # pale green — our own processes
 COLOR_MEM_OTHER = "#4A7FA5"   # steel blue — other tenants / used by others
+# Drop ghost: a mid-gray shadow, deliberately darker than the empty track so
+# it reads as "this bar fell from here" and not as a second data series. At
+# #E2E7EB it was lighter than the fill and looked like a white band.
+COLOR_GHOST = "#8D9AA5"
 
 COLOR_MEM_CACHE = "#A8C3D1"  # pale steel — page cache / reclaimable
 

@@ -125,23 +125,19 @@ def _float_history(raw: Any) -> dict[str, float]:
     return {k: float(v) for k, v in raw.items() if isinstance(v, (int, float))}
 
 
-def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: int,
-                     our_share_pct: float = 0.0, visible: int = 0) -> list[str]:
+def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: int) -> list[str]:
     """Per-core water-fill bars.
 
     Colour is the whole point of this chart, so the families are exact:
-      green  — work attributable to our processes
-      blue   — the rest of the host: other tenants
+      green  — cores proven to be ours (affinity mask narrowed below the host)
+      blue   — every other core: other tenants' work
       gray   — the drop ghost, the portion a bar fell since the last tick
 
-    Two ways our work is shown, because the platform may or may not tell us
-    which cores are ours:
-      limit > 0  — the affinity mask is narrower than the host, so the first
-                   `limit` bars ARE ours and get a full green fill.
-      limit == 0 — we cannot attribute any row. Then `our_share_pct` (our
-                   processes' load as a share of the whole machine) is drawn as
-                   a green underlay at the base of every bar, so our 1.3% is
-                   visible even though no single row is provably ours.
+    Our load is NOT smeared across these bars. It was tried, and at a realistic
+    0.3% of a 16-core quota that works out to 0.05% of a bar — a tenth of a
+    pixel, invisible, and it obscured the host's own data to no benefit. It is
+    shown instead on the green segment of the "who is using the host" bar
+    above, where it is measured and readable.
 
     A bar that fell keeps the lost portion in gray until the next tick melts
     it away, which reads as motion instead of a jump.
@@ -154,20 +150,8 @@ def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: 
         drop = max(min(float(before), 100.0) - pct, 0.0) if isinstance(before, (int, float)) else 0.0
         has_ghost = drop >= 0.5
         ours_core = i < limit
-        if ours_core:
-            fill = COLOR_OURS
-            underlay = ""
-            value_color = COLOR_TEXT
-        else:
-            fill = COLOR_MEM_OTHER
-            value_color = COLOR_MUTED
-            # Our share of the machine, drawn as a green base under the host's
-            # blue. It is a floor-level marker, not a claim about this row.
-            share = min(max(float(our_share_pct), 0.0), pct)
-            underlay = (
-                f'<div class="uf5-ours" style="height:{share:.1f}%"></div>'
-                if share >= 0.05 else ""
-            )
+        fill = COLOR_OURS if ours_core else COLOR_MEM_OTHER
+        value_color = COLOR_TEXT if ours_core else COLOR_MUTED
         # Flush joint: flat top hugged by the ghost, no seam.
         fill_radius = "0 0 8px 8px" if has_ghost else "8px"
         ghost = (
@@ -177,7 +161,7 @@ def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: 
         )
         bars.append(
             f'<div class="uf5-col"><div class="uf5-val" style="color:{value_color}">{pct:.0f}</div>'
-            f'<div class="uf5-track">{underlay}'
+            f'<div class="uf5-track">'
             f'<div class="uf5-fill" '
             f'style="height:{pct:.1f}%;background:{fill};'
             f'animation-delay:{i * 70}ms;border-radius:{fill_radius}"></div>'
@@ -338,10 +322,7 @@ def render_cpu_panel() -> None:
         split = _affinity_narrows(source, ours, len(per_core))
         limit = ours if split else 0
         prev = _float_history(st.session_state.get("uf5_cpu_prev"))
-        # Our processes' load as a share of the whole machine, so the green
-        # underlay is proportional to the host, not to a core.
-        our_share_of_host = round(our_core_pct / 100.0 * max(len(per_core), 1), 2)
-        bars = render_core_bars(per_core, prev, limit, our_share_pct=our_share_of_host)
+        bars = render_core_bars(per_core, prev, limit)
         st.session_state["uf5_cpu_prev"] = dict(per_core)
         st.markdown(f'<div class="uf5-row">{"".join(bars)}</div>',
                     unsafe_allow_html=True)
@@ -354,8 +335,8 @@ def render_cpu_panel() -> None:
             st.markdown(
                 f'<div style="color:{COLOR_MUTED};font-size:11px;margin-top:4px">'
                 f'host per-core load, all {len(per_core)} cores · the platform does not tell us which '
-                f'are ours, so the green base on every bar is our total load ({our_core_pct:.1f}% of '
-                f'our {ours} cores) and blue above it is the host'
+                f'are ours, so every bar here is the host\'s. Our {our_core_pct:.1f}% is the green '
+                f'segment in the bar above.'
                 f'</div>', unsafe_allow_html=True)
 
 
@@ -399,18 +380,23 @@ def render_split_load_bar(ours_pct: float, other_pct: float, host_pct: float) ->
     ours = max(0.0, min(float(ours_pct), 100.0))
     other = max(0.0, min(float(other_pct), 100.0 - ours))
     host = max(0.0, min(float(host_pct), 100.0 - ours - other))
-    segs = [("Ours", ours, COLOR_OURS),
-            ("Other pids", other, COLOR_MEM_OTHER),
-            ("Rest of host", host, COLOR_MEM_CACHE)]
+    # A 0.3% share is 3px of a 22px bar and reads as nothing. Give any
+    # *non-zero* share a visible floor so "we are using some CPU" is legible;
+    # a true zero stays zero, otherwise the bar would claim load that is not
+    # there. The label always carries the real number.
+    shown_ours = 0.0 if ours < 0.05 else (ours if ours >= 2.0 else 1.5)
+    segs = [("Ours", ours, shown_ours, COLOR_OURS),
+            ("Other pids", other, other, COLOR_MEM_OTHER),
+            ("Rest of host", host, host, COLOR_MEM_CACHE)]
     bar = "".join(
         f'<div class="uf5-memseg" title="{label} {value:.1f}%" '
-        f'style="width:{value:.1f}%;background:{color}"></div>'
-        for label, value, color in segs
+        f'style="width:{shown:.1f}%;background:{color}"></div>'
+        for label, value, shown, color in segs
     )
     legend = "".join(
         f'<span><span class="uf5-dot" style="background:{color}"></span>'
         f'{label} <b>{value:.1f}%</b></span>'
-        for label, value, color in segs
+        for label, value, _shown, color in segs
     )
     return (f'<div class="uf5-memtrack" style="height:22px">{bar}</div>'
             f'<div class="uf5-legend">{legend}</div>')
