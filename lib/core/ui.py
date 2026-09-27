@@ -5,31 +5,27 @@ import re
 from lib.core.config import (BAR_FILL, BAR_GHOST, BAR_TRACK_BG, COLOR_ACCENT,
                              COLOR_ACCENT_PALE, COLOR_ACCENT_SOFT, COLOR_BG,
                              COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MUTED,
-                             COLOR_OURS, COLOR_PANEL, COLOR_TEXT, ICON_SVGS)
-
-
-# The stylesheet is ~16KB. Streamlit re-sends every st.markdown block on every
-# rerun, so injecting it each time put 16KB of identical CSS through the
-# websocket on every fragment tick. It is immutable for the process lifetime,
-# so it goes out once per session and is never re-sent.
-_style_sessions: set[str] = set()
+                             COLOR_OURS, COLOR_PANEL, COLOR_TEXT,                              ICON_SVGS)
 
 
 
 def inject_style() -> None:
-    """Send the stylesheet once per browser session, never on every rerun.
+    """Send the stylesheet on the first render of a session, every rerun after.
 
-    16KB of CSS per rerun was the single largest source of websocket traffic:
-    at a 2-second fragment cadence that is ~470KB/minute of markup that the
-    browser already has. Keyed on the widget's session id so a hard reload
-    (new session) still gets it.
+    Streamlit rebuilds the element tree from scratch on every rerun, so a
+    st.markdown block that is not re-emitted disappears from the DOM. The
+    previous version guarded the call with a module-level set and therefore
+    sent the CSS exactly once — after the first rerun the whole stylesheet
+    vanished and the layout collapsed to unstyled text. That is a
+    correctness bug, not an optimisation: the block MUST be re-emitted on
+    every full run.
+
+    Fragments are the only place this is avoidable. inject_style is called
+    from main(), which runs on every full script execution, so the cost is
+    one stylesheet per full rerun rather than one per fragment tick — the
+    2-second CPU panel no longer multiplies it.
     """
     import streamlit as st
-
-    sid = getattr(getattr(st, "context", None), "session_id", None) or "default"
-    if sid in _style_sessions:
-        return
-    _style_sessions.add(sid)
 
     st.markdown(
         f"""<style>

@@ -553,7 +553,12 @@ def render_canvas() -> None:
     else:
         has_open = True
 
-    def _open(tab, name: str) -> bool:
+    def _open(tab) -> bool:
+        """True when this tab is the selected one.
+
+        With lazy tabs only the open tab's body is executed, so the other
+        three render as empty containers that cost nothing per tick.
+        """
         if not has_open:
             return True
         try:
@@ -567,7 +572,7 @@ def render_canvas() -> None:
         return st.session_state.get("uf5_section", "stats") == "stats"
 
     tab_mem, tab_cpu, tab_proc, tab_disk = tabs
-    is_mem, is_cpu, is_proc, is_disk = (_open(t, n) for t, n in zip(tabs, labels))
+    is_mem, is_cpu, is_proc, is_disk = (_open(t) for t in tabs)
 
     if is_mem:
         with tab_mem:

@@ -404,5 +404,46 @@ class MemoryTrackTests(unittest.TestCase):
         self.assertIn("width:", html)
 
 
+class StylesheetEmissionTests(unittest.TestCase):
+    """inject_style must emit the stylesheet on EVERY full rerun.
+
+    Regression: it was guarded by a module-level "already sent" set, so the
+    stylesheet went out exactly once. Streamlit rebuilds the element tree on
+    every rerun and an un-emitted st.markdown block disappears from the DOM —
+    after the first rerun the whole stylesheet was gone and the CPU panel
+    collapsed to bare text ("cpu0 3 10 cpu1 8 ...", no bars, no legend).
+    Optimising the wire format by skipping the block broke the UI.
+    """
+
+    def test_inject_style_has_no_module_level_suppression(self):
+        import lib.core.ui as ui
+        source = pathlib.Path(ui.__file__).read_text()
+        self.assertNotIn("_style_sessions", source,
+                         "CSS must not be suppressed by a module-level guard")
+        self.assertNotRegex(source, r"def inject_style.*?return\n\n",
+                            "inject_style must not early-return before st.markdown")
+
+    def test_inject_style_always_calls_markdown(self):
+        import inspect
+
+        import lib.core.ui as ui
+        body = inspect.getsource(ui.inject_style)
+        self.assertIn("st.markdown", body)
+        # A guard would be an early return before the emission.
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        first_markdown = next(i for i, ln in enumerate(lines) if "st.markdown(" in ln)
+        for ln in lines[:first_markdown]:
+            self.assertNotIn("return", ln, "no early return before emitting CSS")
+
+    def test_stylesheet_is_substantial(self):
+        """A 16KB block is worth one full rerun; a stub is not."""
+        import lib.core.ui as ui
+        source = pathlib.Path(ui.__file__).read_text()
+        self.assertIn(".uf5-track", source, "the bar CSS must exist")
+        self.assertIn("BAR_TRACK_BG", source, "track colour must be interpolated")
+        self.assertIn("BAR_FILL", source)
+        self.assertIn("BAR_GHOST", source)
+
+
 if __name__ == "__main__":
     unittest.main()
