@@ -2,15 +2,34 @@
 from __future__ import annotations
 import os
 import re
-from lib.core.config import (COLOR_ACCENT, COLOR_ACCENT_PALE, COLOR_ACCENT_SOFT,
-                             COLOR_BG, COLOR_BORDER, COLOR_GHOST, COLOR_MEM_CACHE,
-                             COLOR_MUTED, COLOR_OURS, COLOR_PANEL, COLOR_TEXT,
-                             ICON_SVGS)
+from lib.core.config import (BAR_FILL, BAR_GHOST, BAR_TRACK_BG, COLOR_ACCENT,
+                             COLOR_ACCENT_PALE, COLOR_ACCENT_SOFT, COLOR_BG,
+                             COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MUTED,
+                             COLOR_OURS, COLOR_PANEL, COLOR_TEXT, ICON_SVGS)
+
+
+# The stylesheet is ~16KB. Streamlit re-sends every st.markdown block on every
+# rerun, so injecting it each time put 16KB of identical CSS through the
+# websocket on every fragment tick. It is immutable for the process lifetime,
+# so it goes out once per session and is never re-sent.
+_style_sessions: set[str] = set()
 
 
 
 def inject_style() -> None:
+    """Send the stylesheet once per browser session, never on every rerun.
+
+    16KB of CSS per rerun was the single largest source of websocket traffic:
+    at a 2-second fragment cadence that is ~470KB/minute of markup that the
+    browser already has. Keyed on the widget's session id so a hard reload
+    (new session) still gets it.
+    """
     import streamlit as st
+
+    sid = getattr(getattr(st, "context", None), "session_id", None) or "default"
+    if sid in _style_sessions:
+        return
+    _style_sessions.add(sid)
 
     st.markdown(
         f"""<style>
@@ -117,11 +136,11 @@ def inject_style() -> None:
                     width: 100%; }}
         .uf5-col {{ flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
                     align-items: center; }}
-        /* The empty part of a bar is the host's idle capacity, so it reads as
-           pale blue rather than a neutral gray — gray is reserved for the
-           drop ghost. */
+        /* Per-core bar bands, each its own colour so a falling bar reads as
+           three distinct bands: empty capacity, the host's load, and the ghost
+           marking what it fell from. */
         .uf5-track {{ width: 100%; max-width: 100%; height: clamp(90px, 22vh, 220px);
-                      background: {COLOR_MEM_CACHE}; border-radius: 8px;
+                      background: {BAR_TRACK_BG}; border-radius: 8px;
                       position: relative; overflow: hidden; }}
         .uf5-fill {{ position: absolute; bottom: 0; left: 0; right: 0;
                      background: linear-gradient(to top, {COLOR_ACCENT}, {COLOR_ACCENT_SOFT});
@@ -135,10 +154,10 @@ def inject_style() -> None:
                     margin-bottom: 2px; }}
         @keyframes uf5fill {{ from {{ transform: scaleY(0); }} to {{ transform: scaleY(1); }} }}
         /* Drop ghost: the portion a bar fell since the last tick. It is the one
-           place gray belongs on a bar — a neutral marker of a decrease, not a
-           data category. Data is green (ours) or blue (the host's). */
+           place the ghost colour belongs on a bar — a marker of a decrease,
+           not a data category. */
         .uf5-ghost {{ position: absolute; left: 0; right: 0;
-                     background: {COLOR_GHOST}; opacity: .9; border-radius: 8px 8px 0 0;
+                     background: {BAR_GHOST}; opacity: .95; border-radius: 8px 8px 0 0;
                      transition: bottom .9s cubic-bezier(.22,.8,.3,1),
                                  height .9s cubic-bezier(.22,.8,.3,1),
                                  opacity 1.6s ease; }}

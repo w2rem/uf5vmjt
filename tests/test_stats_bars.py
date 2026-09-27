@@ -9,8 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.core.config import (COLOR_BORDER, COLOR_MEM_FREE,  # noqa: E402
-                             COLOR_MEM_OTHER, COLOR_OURS)
+from lib.core.config import (BAR_FILL, BAR_GHOST, BAR_TRACK_BG,  # noqa: E402
+                             COLOR_MEM_FREE, COLOR_MEM_OTHER, COLOR_OURS,
+                             CORE_OURS, MEM_FREE, MEM_HOST, MEM_OURS,
+                             MEM_OURS_SIBLING)
 from lib.sections.stats import (PROCESS_REFRESH_DEFAULT,  # noqa: E402
                                 PROCESS_REFRESH_MAX, PROCESS_REFRESH_MIN,
                                 ROLE_LABEL, _affinity_narrows,
@@ -56,16 +58,16 @@ class CoreBarsTests(unittest.TestCase):
         self.assertIn("height:10.0%", bars[0])
         self.assertIn("height:20.0%", bars[1])
 
-    def test_ours_green_host_blue(self):
-        # Green is only ever ours; every other core is the host's, in blue.
-        # Regression: non-ours cores were painted COLOR_BORDER (pale gray),
-        # which is indistinguishable from the empty part of a bar.
+    def test_ours_green_host_fill(self):
+        # Green is only ever ours; every other core is the host's, in the
+        # configured fill colour. Regression: non-ours cores were painted
+        # COLOR_BORDER (pale gray), indistinguishable from the empty track.
         bars = render_core_bars({"cpu0": 5.0, "cpu1": 5.0, "cpu2": 5.0}, {}, limit=2)
-        self.assertIn(COLOR_OURS, bars[0])
-        self.assertIn(COLOR_OURS, bars[1])
-        self.assertNotIn(COLOR_OURS, bars[2])
-        self.assertIn(COLOR_MEM_OTHER, bars[2])
-        self.assertNotIn(COLOR_BORDER, bars[2])
+        self.assertIn(CORE_OURS, bars[0])
+        self.assertIn(CORE_OURS, bars[1])
+        self.assertNotIn(CORE_OURS, bars[2])
+        self.assertIn(BAR_FILL, bars[2])
+        self.assertNotIn(BAR_TRACK_BG, bars[2], "fill must not match the empty track")
 
     def test_ghost_only_when_value_dropped(self):
         rising = render_core_bars({"cpu0": 50.0}, {"cpu0": 10.0}, limit=1)
@@ -172,6 +174,21 @@ class ColorFamilyTests(unittest.TestCase):
     def test_ours_is_green_family(self):
         self.assertTrue(COLOR_OURS.startswith("#A8"), COLOR_OURS)
 
+    def test_track_fill_and_ghost_are_distinct(self):
+        # Regression: the fill, the empty track and the ghost were all pale
+        # greys, so a falling bar read as one white mass.
+        self.assertNotEqual(BAR_FILL, BAR_TRACK_BG)
+        self.assertNotEqual(BAR_GHOST, BAR_TRACK_BG)
+        self.assertNotEqual(BAR_GHOST, BAR_FILL)
+
+    def test_memory_palette_has_free_ours_and_host(self):
+        for name, value in (("MEM_FREE", MEM_FREE), ("MEM_OURS", MEM_OURS),
+                            ("MEM_HOST", MEM_HOST)):
+            self.assertRegex(value, r"^#[0-9A-Fa-f]{6}$", f"{name}={value}")
+        self.assertNotEqual(MEM_FREE, MEM_OURS)
+        self.assertNotEqual(MEM_OURS, MEM_HOST)
+        self.assertNotEqual(MEM_OURS_SIBLING, MEM_OURS)
+
     def test_other_is_blue_family(self):
         blue = COLOR_MEM_OTHER.lstrip("#").lower()
         red, green, blue_ch = blue[0:2], blue[2:4], blue[4:6]
@@ -180,7 +197,7 @@ class ColorFamilyTests(unittest.TestCase):
 
     def test_green_and_blue_families_are_distinct(self):
         self.assertNotEqual(COLOR_OURS, COLOR_MEM_OTHER)
-        self.assertNotEqual(COLOR_OURS, COLOR_BORDER)
+        self.assertNotEqual(CORE_OURS, COLOR_MEM_OTHER)
 
     def test_split_load_bar_is_green_for_ours(self):
         html = render_split_load_bar(20.0, 5.0, 75.0)
@@ -257,11 +274,17 @@ class NameResolutionTests(unittest.TestCase):
     check that catches this class of bug before deploy.
     """
 
+    def _palette_names(self, source: str) -> set[str]:
+        # Colours now live under two prefixes: COLOR_* (legacy) and the
+        # BAR_*/MEM_*/CORE_* families introduced for the explicit band
+        # palette. All of them are module-level names a render can NameError on.
+        return set(re.findall(r"\b(?:COLOR|BAR|MEM|CORE)_[A-Z_]+\b", source))
+
     def test_all_colors_used_by_stats_are_imported(self):
         import lib.core.config as cfg
         import lib.sections.stats as stats
-        source = pathlib.Path(stats.__file__).read_text()
-        used = set(re.findall(r"\bCOLOR_[A-Z_]+\b", source))
+        used = self._palette_names(pathlib.Path(stats.__file__).read_text())
+        self.assertTrue(used)
         for name in sorted(used):
             self.assertTrue(hasattr(cfg, name), f"{name} used in stats.py but absent from config")
             self.assertTrue(hasattr(stats, name), f"{name} used but not imported into stats")
@@ -271,8 +294,7 @@ class NameResolutionTests(unittest.TestCase):
         # block, so a missing import is a NameError on the first render.
         import lib.core.config as cfg
         import lib.core.ui as ui
-        source = pathlib.Path(ui.__file__).read_text()
-        used = set(re.findall(r"\bCOLOR_[A-Z_]+\b", source))
+        used = self._palette_names(pathlib.Path(ui.__file__).read_text())
         self.assertTrue(used, "ui.py must reference some colors")
         for name in sorted(used):
             self.assertTrue(hasattr(cfg, name), f"{name} used in ui.py but absent from config")
@@ -280,8 +302,7 @@ class NameResolutionTests(unittest.TestCase):
 
     def test_render_memory_bar_resolves_names(self):
         import lib.sections.stats as stats
-        names = set(re.findall(r"\bCOLOR_[A-Z_]+\b",
-                               pathlib.Path(stats.__file__).read_text()))
+        names = self._palette_names(pathlib.Path(stats.__file__).read_text())
         for name in names:
             # Resolving in the function's module globals is what a real call does.
             self.assertIn(name, stats.__dict__ if hasattr(stats, "__dict__") else vars(stats),
@@ -296,7 +317,8 @@ class NameResolutionTests(unittest.TestCase):
         root = pathlib.Path(cfg.__file__).resolve().parents[1]
         blob = "\n".join(p.read_text() for p in root.rglob("*.py")
                          if "tests" not in p.parts)
-        for name in sorted(n for n in dir(cfg) if n.startswith("COLOR_")):
+        for name in sorted(n for n in dir(cfg)
+                           if n.startswith(("COLOR_", "BAR_", "MEM_", "CORE_"))):
             self.assertIn(name, blob, f"{name} declared in config but never used")
 
 
@@ -324,13 +346,13 @@ class AffinitySplitTests(unittest.TestCase):
             self.assertNotIn(COLOR_OURS, bar, "no row may be ours without proof")
 
     def test_our_load_is_not_smeared_across_bars(self):
-        # Regression: our 0.3% was spread over 16 bars = 0.05% each, a tenth
-        # of a pixel, invisible while adding noise to every host bar. It is
+        # Regression: our 0.3% was spread over 16 bars = 0.05% each, a tenth of
+        # a pixel, invisible while adding noise to every host bar. It is
         # shown on the "who is using the host" bar instead.
         bars = render_core_bars({f"cpu{i}": 40.0 for i in range(16)}, {}, limit=0)
         for bar in bars:
             self.assertNotIn("uf5-ours", bar)
-            self.assertIn(COLOR_MEM_OTHER, bar)
+            self.assertIn(BAR_FILL, bar)
 
     def test_tiny_nonzero_share_gets_a_visible_floor(self):
         # 0.3% of a 22px bar is 0.07px. Any non-zero share gets a floor so

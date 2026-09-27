@@ -5,9 +5,9 @@ import os
 import re
 import time
 from typing import Any
-from lib.core.config import (COLOR_BORDER, COLOR_MEM_CACHE, COLOR_MEM_FREE,
-                             COLOR_MEM_OTHER, COLOR_MUTED, COLOR_OURS,
-                             COLOR_TEXT)
+from lib.core.config import (BAR_FILL, COLOR_MEM_OTHER, COLOR_MUTED, COLOR_OURS,
+                             COLOR_TEXT, CORE_OURS, MEM_FREE, MEM_HOST,
+                             MEM_HOST_CACHE, MEM_OURS, MEM_OURS_SIBLING)
 from lib.core.ui import badge
 from lib.services import procs
 from lib.services.disk import render_disk_panel
@@ -53,24 +53,30 @@ def render_memory_bar() -> None:
     other_pids_kb = max(0, sum(p.rss_kb for p in census if not p.is_ours))
     host_active_kb = max(0, used - cache)
 
+    # Our container's track. Denominator is the quota, so our 176MB reads as
+    # 6% of 2.7GB rather than 0.1% of the host's 128GB.
     st.markdown(
         f'<div style="color:{COLOR_MUTED};font-size:11px;margin:8px 0 2px">'
-        f'our container · {fmt_mb(ceiling_kb if limited else total)} quota · active (no cache)</div>',
+        f'our app · {fmt_mb(ceiling_kb if limited else total)} quota · active, no cache</div>',
         unsafe_allow_html=True)
     our_base = ceiling_kb if limited else total
-    our_segs = [("Ours", min(our_rss_kb, our_base), COLOR_OURS),
-                ("Other pids", max(0, min(other_pids_kb, our_base - our_rss_kb)), COLOR_MEM_OTHER),
-                ("Free", max(0, our_base - our_rss_kb - other_pids_kb), COLOR_MEM_FREE)]
+    our_segs = [("our app", min(our_rss_kb, our_base), MEM_OURS),
+                ("our app, other pids",
+                 max(0, min(other_pids_kb, our_base - our_rss_kb)), MEM_OURS_SIBLING),
+                ("free", max(0, our_base - our_rss_kb - other_pids_kb), MEM_FREE)]
     st.markdown(render_memory_track(our_segs, our_base), unsafe_allow_html=True)
 
+    # The host's track. Same container seen from the machine's side, so our
+    # share is repeated here at a different scale instead of being invisible.
     st.markdown(
         f'<div style="color:{COLOR_MUTED};font-size:11px;margin:12px 0 2px">'
-        f'the host · {fmt_gb(total * 1024)} total · active {fmt_mb(host_active_kb)} '
-        f'· cache {fmt_mb(cache)} not counted</div>', unsafe_allow_html=True)
-    host_segs = [("Ours", min(our_rss_kb, total), COLOR_OURS),
-                ("Other tenants", max(0, min(host_active_kb - our_rss_kb, total - our_rss_kb)), COLOR_MEM_OTHER),
-                ("Cache", min(cache, max(0, total - host_active_kb)), COLOR_MEM_CACHE),
-                ("Free", max(0, total - host_active_kb - cache), COLOR_MEM_FREE)]
+        f'the host · {fmt_gb(total * 1024)} total · active {fmt_mb(host_active_kb)} · '
+        f'cache {fmt_mb(cache)} reclaimable</div>', unsafe_allow_html=True)
+    host_segs = [("our app", min(our_rss_kb, total), MEM_OURS),
+                ("other tenants",
+                 max(0, min(host_active_kb - our_rss_kb, total - our_rss_kb)), MEM_HOST),
+                ("host cache", min(cache, max(0, total - host_active_kb)), MEM_HOST_CACHE),
+                ("free", max(0, total - host_active_kb - cache), MEM_FREE)]
     st.markdown(render_memory_track(host_segs, total), unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
@@ -150,7 +156,7 @@ def render_core_bars(per_core: dict[str, float], prev: dict[str, float], limit: 
         drop = max(min(float(before), 100.0) - pct, 0.0) if isinstance(before, (int, float)) else 0.0
         has_ghost = drop >= 0.5
         ours_core = i < limit
-        fill = COLOR_OURS if ours_core else COLOR_MEM_OTHER
+        fill = CORE_OURS if ours_core else BAR_FILL
         value_color = COLOR_TEXT if ours_core else COLOR_MUTED
         # Flush joint: flat top hugged by the ghost, no seam.
         fill_radius = "0 0 8px 8px" if has_ghost else "8px"
@@ -387,7 +393,7 @@ def render_split_load_bar(ours_pct: float, other_pct: float, host_pct: float) ->
     shown_ours = 0.0 if ours < 0.05 else (ours if ours >= 2.0 else 1.5)
     segs = [("Ours", ours, shown_ours, COLOR_OURS),
             ("Other pids", other, other, COLOR_MEM_OTHER),
-            ("Rest of host", host, host, COLOR_MEM_CACHE)]
+            ("Rest of host", host, host, MEM_HOST)]
     bar = "".join(
         f'<div class="uf5-memseg" title="{label} {value:.1f}%" '
         f'style="width:{shown:.1f}%;background:{color}"></div>'
@@ -496,7 +502,7 @@ def render_processes() -> None:
         )
         body = ""
         for p in census:
-            accent = COLOR_OURS if p.is_ours else COLOR_BORDER
+            accent = CORE_OURS if p.is_ours else BAR_FILL
             role = ROLE_LABEL.get(p.role, p.role)
             now_pct = live_pct.get(p.pid)
             now_cell = ("—" if now_pct is None else f"{now_pct:.1f}%")
@@ -526,58 +532,81 @@ def render_processes() -> None:
 
 
 def render_canvas() -> None:
-    """Memory / CPU canvases as native tabs (no switcher widget, no emoji).
+    """Memory / CPU / Processes / Disk as tabs with lazy execution.
 
-    Each tab owns a realtime fragment; the visible one animates, the hidden
-    one costs a single /proc read per tick. Wheel switching is impossible in
-    pure Streamlit — tabs are the lightest native mechanism.
-
-    The process table inside render_cpu_panel is the one exception to the
-    realtime rule: it is re-read but its identity changes rarely, so the
-    census is cached per section visit instead of being re-rendered into the
-    DOM every 2 seconds (the F7 pattern that made the panel flicker).
+    Streamlit computes and ships every tab's content by default, so all four
+    fragments were ticking at once — including the two the operator was not
+    looking at. `on_change="rerun"` makes tab content lazy: only the selected
+    tab is executed, and `TabContainer.open` says which one it is. That drops
+    the per-tick work from four panels to one.
     """
     import streamlit as st
 
+    labels = ["Memory", "CPU", "Processes", "Disk"]
     try:
-        live = st.fragment(run_every=2)
-        slow = st.fragment(run_every=5)
+        tabs = st.tabs(labels, on_change="rerun")
     except TypeError:
-        live = slow = st.fragment
+        # Older Streamlit has no lazy tabs and no .open; fall back to eager
+        # rendering and rely on the section guard instead.
+        tabs = st.tabs(labels)
+        has_open = False
+    else:
+        has_open = True
 
-    tab_mem, tab_cpu, tab_proc, tab_disk = st.tabs(["Memory", "CPU", "Processes", "Disk"])
+    def _open(tab, name: str) -> bool:
+        if not has_open:
+            return True
+        try:
+            return bool(tab.open)
+        except Exception:
+            return True
 
     def _on_stats() -> bool:
         # Stale auto-timers from a previous section must render nothing —
         # otherwise their deltas land in a foreign section tree.
         return st.session_state.get("uf5_section", "stats") == "stats"
 
-    with tab_mem:
-        @live
-        def _live_memory() -> None:
-            if _on_stats():
-                render_memory_bar()
+    tab_mem, tab_cpu, tab_proc, tab_disk = tabs
+    is_mem, is_cpu, is_proc, is_disk = (_open(t, n) for t, n in zip(tabs, labels))
 
-        _live_memory()
+    if is_mem:
+        with tab_mem:
+            @_live_fragment(st, 2)
+            def _live_memory() -> None:
+                if _on_stats():
+                    render_memory_bar()
 
-    with tab_cpu:
-        @live
-        def _live_cpu() -> None:
-            if _on_stats():
-                render_cpu_panel()
+            _live_memory()
 
-        _live_cpu()
+    if is_cpu:
+        with tab_cpu:
+            @_live_fragment(st, 2)
+            def _live_cpu() -> None:
+                if _on_stats():
+                    render_cpu_panel()
 
-    with tab_proc:
-        render_processes()
+            _live_cpu()
 
-    with tab_disk:
-        @slow
-        def _live_disk() -> None:
-            if _on_stats():
-                render_disk_panel()
+    if is_proc:
+        with tab_proc:
+            render_processes()
 
-        _live_disk()
+    if is_disk:
+        with tab_disk:
+            @_live_fragment(st, 5)
+            def _live_disk() -> None:
+                if _on_stats():
+                    render_disk_panel()
+
+            _live_disk()
+
+
+def _live_fragment(st: Any, seconds: int):
+    """st.fragment(run_every=N) with a fallback for builds that lack it."""
+    try:
+        return st.fragment(run_every=seconds)
+    except TypeError:
+        return st.fragment
 
 
 def render_geo_cluster() -> None:

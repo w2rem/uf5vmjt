@@ -26,20 +26,30 @@ COLOR_WARN = "#C9A227"
 
 COLOR_ERR = "#C26D6D"
 
-# Two families, and they must not blur together:
-#   green  = what OUR processes do (cores in our quota, our RSS)
-#   blue   = everything else on the shared host (other tenants, page cache)
-# The accent blue marks UI chrome, never data ownership.
-COLOR_OURS = "#A8C98A"        # pale green — our own processes
-COLOR_MEM_OTHER = "#4A7FA5"   # steel blue — other tenants / used by others
-# Drop ghost: a mid-gray shadow, deliberately darker than the empty track so
-# it reads as "this bar fell from here" and not as a second data series. At
-# #E2E7EB it was lighter than the fill and looked like a white band.
-COLOR_GHOST = "#8D9AA5"
+# ── Per-core bars (uf5-track) ───────────────────────────────────
+# Empty track, filled portion, and the drop ghost each get their own colour so
+# a falling bar reads as three distinct bands rather than one pale mass.
+BAR_TRACK_BG = "#D2D4C8"    # empty capacity
+BAR_FILL = "#889696"        # the host's actual load on a core
+BAR_GHOST = "#878E99"        # the portion a bar fell since the last tick
+# Which cores are ours: fully green, or the host colour when unproven.
+CORE_OURS = "#A8C98A"
 
-COLOR_MEM_CACHE = "#A8C3D1"  # pale steel — page cache / reclaimable
+# ── Memory track (uf5-memtrack) ────────────────────────────────
+# Free space is the lightest tone; the host's own usage is the darkest, and
+# our own app sits in the middle so it is findable on a long track.
+MEM_FREE = "#D9FFF8"         # our app, unallocated headroom
+MEM_OURS = "#F1E3F3"         # our app's resident memory
+MEM_OURS_SIBLING = "#E8D4EC"  # other pids of our app
+MEM_HOST = "#7D82B8"         # the rest of the host
+MEM_HOST_CACHE = "#9EA3D9"    # host page cache, reclaimable
 
-COLOR_MEM_FREE = "#E8EDEF"  # pale gray — free
+COLOR_OURS = "#A8C98A"        # generic "ours" green, used for CPU split
+COLOR_MEM_OTHER = "#4A7FA5"   # steel blue — other pids in our container
+COLOR_GHOST = BAR_GHOST
+
+COLOR_MEM_CACHE = "#9EA3D9"  # pale steel — page cache (kept for disk.py)
+COLOR_MEM_FREE = "#D9FFF8"   # pale gray — free (kept for backwards compat)
 
 
 ICON_PYTHON = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="#211f1f" fill-rule="evenodd"><path d="M14.31.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.83l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.23l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05L0 11.97l.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.24l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05 1.07.13zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09-.33.22zM21.1 6.11l.28.06.32.12.35.18.36.27.36.35.35.47.32.59.28.73.21.88.14 1.04.05 1.23-.06 1.23-.16 1.04-.24.86-.32.71-.36.57-.4.45-.42.33-.42.24-.4.16-.36.09-.32.05-.24.02-.16-.01h-8.22v.82h5.84l.01 2.76.02.36-.05.34-.11.31-.17.29-.25.25-.31.24-.38.2-.44.17-.51.15-.58.13-.64.09-.71.07-.77.04-.84.01-1.27-.04-1.07-.14-.9-.2-.73-.25-.59-.3-.45-.33-.34-.34-.25-.34-.16-.33-.1-.3-.04-.25-.02-.2.01-.13v-5.34l.05-.64.13-.54.21-.46.26-.38.3-.32.33-.24.35-.2.35-.14.33-.1.3-.06.26-.04.21-.02.13-.01h5.84l.69-.05.59-.14.5-.21.41-.28.33-.32.27-.35.2-.36.15-.36.1-.35.07-.32.04-.28.02-.21V6.07h2.09l.14.01.21.03zm-6.47 14.25l-.23.33-.08.41.08.41.23.33.33.23.41.08.41-.08.33-.23.23-.33.08-.41-.08-.41-.23-.33-.33-.23-.41-.08-.41.08-.33.23z"/></g></svg>'''
